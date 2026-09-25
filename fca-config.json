@@ -1,0 +1,38 @@
+{
+  "autoLogin": true,
+  "autoUpdate": false,
+  "processErrorHandlers": true,
+  "options": {
+    "selfListen": false,
+    "selfListenEvent": false,
+    "listenEvents": true,
+    "listenTyping": false,
+    "updatePresence": false,
+    "forceLogin": true,
+    "autoMarkRead": false,
+    "autoReconnect": true,
+    "online": true,
+    "emitReady": true,
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
+  },
+  "session": {
+    "autoSave": true,
+    "saveIntervalMs": 600000,
+    "keepAliveIntervalMs": 780000,
+    "healthCheckIntervalMs": 1200000,
+    "refreshThresholdMs": 1209600000,
+    "criticalThresholdMs": 259200000
+  },
+  "mqtt": {
+    "enabled": true,
+    "autoReconnect": true,
+    "staleAfterMs": 480000,
+    "watchdogIntervalMs": 30000,
+    "pingIntervalMs": 120000,
+    "reconnectBaseMs": 2000,
+    "reconnectCapMs": 300000,
+    "cooldownMs": 900000,
+    "authBlockCooldownMs": 5400000,
+    "maxFastAttempts": 10
+  }
+}
