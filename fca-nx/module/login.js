@@ -154,6 +154,12 @@ function login(loginData, options, callback) {
     };
     callback = prCallback;
   }
+  if (loginData?.email || loginData?.password || loginData?.twofactor || loginData?.twoFactor || loginData?.two_factor) {
+    const error = new Error("Credential login is disabled; provide a valid AppState.");
+    error.error = "credentials_login_disabled";
+    callback(error);
+    return returnPromise;
+  }
   const loginKey = extractLoginKey(loginData);
   if (loginKey && global.fca._activeLogins.has(loginKey)) {
     const err = new Error("A login attempt for this account is already in progress.");
@@ -168,7 +174,7 @@ function login(loginData, options, callback) {
     callback(error, api);
   };
 
-  const proceed = () => loginHelper(loginData.appState, loginData.Cookie, loginData.email, loginData.password, globalOptions, wrappedCallback, prCallback, loginData.twofactor || loginData.twoFactor || loginData.two_factor || null);
+  const proceed = () => loginHelper(loginData.appState, loginData.Cookie, null, null, globalOptions, wrappedCallback, prCallback, null);
   if (config && config.autoUpdate) {
     const p = checkAndUpdateVersion();
     if (p && typeof p.then === "function") {

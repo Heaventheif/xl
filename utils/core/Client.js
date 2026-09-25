@@ -76,25 +76,6 @@ export function saveAppStateForBot(state, botIndex = 1, source = "runtime") {
 // ── خيارات fca-nx (متطابقة مع واجهة FCA القياسية) ───────────────────────────
 const GLOBAL_OPTIONS = getFcaOptions();
 
-function getFallbackCredentials() {
-  const email = String(process.env.FACEBOOK_EMAIL || process.env.FB_EMAIL || "").trim();
-  const password = String(process.env.FACEBOOK_PASSWORD || process.env.FB_PASSWORD || "");
-  const twofactor = String(process.env.FACEBOOK_2FA || process.env.FB_2FA || process.env.FACEBOOK_2FA_SECRET || process.env.FB_2FA_SECRET || "").replace(/\s+/g, "").trim();
-  return email && password ? { email, password, ...(twofactor ? { twofactor } : {}) } : null;
-}
-
-function loginWithCredentials(credentials, label) {
-  return new Promise((resolve, reject) => {
-    login(credentials, GLOBAL_OPTIONS, (err, api) => {
-      if (err) {
-        const msg = err?.error || err?.message || String(err);
-        console.error(`[LOGIN:${label}] ❌ تسجيل الدخول الاحتياطي فشل: ${msg}`);
-        return reject(new Error(msg));
-      }
-      resolve(api);
-    });
-  });
-}
 
 async function initializeBot(api, index, label, replacedApi = null) {
   if (replacedApi && replacedApi !== api) {
@@ -109,21 +90,8 @@ async function initializeBot(api, index, label, replacedApi = null) {
     onFirstBotReady: () => startCleanupInterval(),
     getBotName, saveBotName, createMqttConnectionManager,
     onAuthFailed: async () => {
-      const credentials = getFallbackCredentials();
-      if (!credentials) {
-        console.warn(`[AUTH:${label}] ⚠️ لا FACEBOOK_EMAIL/PASSWORD للاسترداد`);
-        return false;
-      }
-      try {
-        console.warn(`[AUTH:${label}] 🔄 AppState غير صالح — محاولة email/password`);
-        await api?.__stopSessionLifecycle?.();
-        const freshApi = await loginWithCredentials(credentials, label);
-        await initializeBot(freshApi, index, label, api);
-        return true;
-      } catch (e) {
-        console.error(`[AUTH:${label}] ❌ فشل الاسترداد: ${e.message}`);
-        return false;
-      }
+      console.warn(`[AUTH:${label}] ⚠️ AppState غير صالح؛ لا يوجد تسجيل دخول بديل مفعّل`);
+      return false;
     },
   });
 }
@@ -132,7 +100,6 @@ async function initializeBot(api, index, label, replacedApi = null) {
 export function loginBot(account) {
   const { state, index } = account;
   const label = `Bot-${index}`;
-  const credentials = getFallbackCredentials();
   console.log(`[LOGIN:${label}] 🔑 تسجيل الدخول بـ AppState (fca-nx)...`);
 
   return new Promise((resolve, reject) => {
@@ -140,13 +107,7 @@ export function loginBot(account) {
       if (err) {
         const msg = err?.error || err?.message || String(err);
         console.error(`[LOGIN:${label}] ❌ AppState فشل: ${msg}`);
-        if (!credentials) return reject(new Error(msg));
-        try {
-          console.warn(`[AUTH:${label}] 🔄 تجربة email/password كاحتياط`);
-          const fallbackApi = await loginWithCredentials(credentials, label);
-          await initializeBot(fallbackApi, index, label);
-          return resolve(fallbackApi);
-        } catch (fe) { return reject(fe); }
+        return reject(new Error(msg));
       }
       console.log(`[LOGIN:${label}] ✅ AppState نجح`);
       try { await initializeBot(api, index, label); resolve(api); }
@@ -155,17 +116,7 @@ export function loginBot(account) {
   });
 }
 
-export async function loginBotWithCredentials(index = 1) {
-  const credentials = getFallbackCredentials();
-  if (!credentials) throw new Error("FACEBOOK_EMAIL/FACEBOOK_PASSWORD غير مضبوطين");
-  const label = `Bot-${index}`;
-  console.log(`[LOGIN:${label}] 🔑 تسجيل الدخول بـ email/password (fca-nx)...`);
-  const api = await loginWithCredentials(credentials, label);
-  await initializeBot(api, index, label);
-  return api;
-}
 
-export function hasFallbackLogin() { return Boolean(getFallbackCredentials()); }
 export const loginBotWithAppState = loginBot;
 export { loadBotNames };
 

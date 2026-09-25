@@ -9,7 +9,7 @@ import { logger, withRetry, isTransientError } from "./utils/resilience.js";
 import { connectDB, disconnectDB, health as dbHealth } from "./db/index.js";
 import { loadConfig } from "./utils/config/index.js";
 import { loadCommands } from "./utils/core/Loader.js";
-import { PROJECT_ROOT, loadAppState, loginBot, loginBotWithCredentials, hasFallbackLogin, stopCleanupInterval } from "./utils/core/Client.js";
+import { PROJECT_ROOT, loadAppState, loginBot, stopCleanupInterval } from "./utils/core/Client.js";
 import { cleanupOrphanTempFiles } from "./utils/tempCleanup.js";
 import "./utils/safeSend.js";
 import webServer from "./webserver.js";
@@ -61,8 +61,8 @@ async function start() {
   await connectDB();
   await loadCommands(commandsDir);
   const appState = await loadAppState();
-  if (!appState && !hasFallbackLogin()) throw new Error("APPSTATE أو FACEBOOK_EMAIL/FACEBOOK_PASSWORD غير موجود");
-  const loginTask = () => appState ? loginBot(appState) : loginBotWithCredentials(1);
+  if (!appState) throw new Error("AppState غير موجود أو غير صالح؛ سجّل الدخول باستخدام AppState فقط");
+  const loginTask = () => loginBot(appState);
   await withRetry(loginTask, {
     label: "facebook-login",
     retries: 5,

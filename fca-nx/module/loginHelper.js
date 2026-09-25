@@ -12,7 +12,6 @@ const { getFrom } = require("../src/utils/constants");
 const { loadConfig } = require("./config");
 
 const { config } = loadConfig();
-const { generateTOTP, normalizeSecret } = require("./totp");
 const regions = [
   { code: "PRN", name: "Pacific Northwest Region", location: "Khu vực Tây Bắc Thái Bình Dương" },
   { code: "VLL", name: "Valley Region", location: "Valley" },
@@ -55,209 +54,6 @@ function mask(s, keep = 3) {
  * third-party login service. If a TOTP secret is configured, the code is
  * generated locally and submitted only to Facebook's own checkpoint form.
  */
-async function loginViaFacebookWeb(email, password, twoFactor = null, globalOptions = {}) {
-  const jar = new CookieJar();
-  const opts = globalOptions || {};
-  const secret = normalizeSecret(twoFactor);
-  const started = Date.now();
-  const cheerio = require("cheerio");
-
-  if (!email || !password) return { ok: false, message: "Please provide email and password" };
-
-  const responseUrl = (res, fallback = "") => String(
-    res?.request?.res?.responseUrl ||
-    res?.request?.responseURL ||
-    res?.request?.res?.req?.res?.responseUrl ||
-    res?.headers?.location ||
-    res?.config?.url ||
-    fallback || ""
-  );
-
-  const bodyOf = (res) => String(res?.data ?? res?.body ?? "");
-
-  const hasUserCookie = async () => {
-    try {
-      const urls = ["https://www.facebook.com/", "https://facebook.com/"];
-      for (const url of urls) {
-        const cookies = await jar.getCookies(url);
-        if (cookies.some(c => (c.key === "c_user" || c.key === "i_user") && c.value)) return true;
-      }
-    } catch {}
-    return false;
-  };
-
-  const formInfo = (html) => {
-    const $ = cheerio.load(String(html || ""));
-    const forms = [];
-    $("form").each((_, el) => {
-      const names = [];
-      $(el).find("input[name]").each((__, input) => names.push(String($(input).attr("name") || "")));
-      const text = $(el).text().replace(/\s+/g, " ").trim().slice(0, 180);
-      forms.push({
-        action: String($(el).attr("action") || ""),
-        names,
-        text
-      });
-    });
-    return forms;
-  };
-
-  const isApprovalHtml = (html) => {
-    const lower = String(html || "").toLowerCase();
-    return /login-approval|approvals_code|name_action_selected|checkpointsubmitbutton|checkpoint\/|two-factor|two_factor|\b2fa\b/.test(lower);
-  };
-
-  const resolveAction = (form, fallback) => {
-    let action = String(form?.attr("action") || fallback || "");
-    try { return new URL(action, "https://www.facebook.com/").toString(); }
-    catch { return fallback; }
-  };
-
-  const submitApproval = async (html, fallbackUrl) => {
-    const $ = cheerio.load(String(html || ""));
-    const candidates = $("form").filter((_, el) => {
-      const names = $(el).find("input[name]").map((__, input) => String($(input).attr("name") || "")).get();
-      const text = $(el).text();
-      return names.some(n => /approvals_code|name_action_selected|checkpoint/i.test(n)) || /login approval|two-factor|security code|confirmation code/i.test(text);
-    });
-    const form = candidates.first().length ? candidates.first() : $("form").first();
-    if (!form.length) return { handled: false, body: html, url: fallbackUrl };
-
-    const data = {};
-    form.find("input[name]").each((_, el) => {
-      const name = String($(el).attr("name") || "");
-      if (name) data[name] = String($(el).attr("value") || "");
-    });
-
-    const action = resolveAction(form, fallbackUrl || "https://www.facebook.com/checkpoint/");
-    const names = Object.keys(data);
-    const needsCode = names.some(n => /approvals_code|approval|2fa|two.?factor|code/i.test(n)) || isApprovalHtml(html);
-
-    if (!needsCode) return { handled: false, body: html, url: action };
-    if (!secret) {
-      const err = new Error("Facebook requires 2FA approval; set FACEBOOK_2FA to the Base32 TOTP secret");
-      err.error = "login-approval";
-      err.loginUrl = action;
-      throw err;
-    }
-
-    const code = await generateTOTP(secret);
-    const codeField = names.includes("approvals_code") ? "approvals_code" :
-      (names.find(n => /verification.?code|security.?code|two.?factor|2fa|^code$/i.test(n)) || "approvals_code");
-    data[codeField] = code;
-
-    if (names.includes("submit[Continue]")) data["submit[Continue]"] = data["submit[Continue]"] || "Continue";
-    else if (names.includes("submit[Continue]")) data["submit[Continue]"] = "Continue";
-
-    logger(chalk.italic(`🔐 Facebook 2FA challenge detected (${codeField})`), "info");
-    const approvalResponse = await post(action, jar, data, opts);
-    const approvalBody = bodyOf(approvalResponse);
-    const approvalUrl = responseUrl(approvalResponse, action);
-
-    if (await hasUserCookie()) return { handled: true, body: approvalBody, url: approvalUrl };
-    if (/invalid|incorrect|wrong|expired/i.test(approvalBody) && /approvals_code|verification|security|two.?factor|2fa/i.test(approvalBody)) {
-      throw new Error("Facebook rejected the generated TOTP code");
-    }
-
-    const after$ = cheerio.load(approvalBody);
-    const reviewForms = after$("form").filter((_, el) => {
-      const names = after$(el).find("input[name]").map((__, input) => String(after$(input).attr("name") || "")).get();
-      return names.includes("name_action_selected") || /dont_save|save_browser|remember/i.test(after$(el).text());
-    });
-    if (reviewForms.first().length) {
-      const review = reviewForms.first();
-      const reviewData = {};
-      review.find("input[name]").each((_, el) => {
-        const name = String(after$(el).attr("name") || "");
-        if (name) reviewData[name] = String(after$(el).attr("value") || "");
-      });
-      reviewData.name_action_selected = "dont_save";
-      await post(resolveAction(review, approvalUrl), jar, reviewData, opts);
-    }
-
-    await get("https://www.facebook.com/", jar, null, opts);
-    return { handled: true, body: approvalBody, url: approvalUrl };
-  };
-
-  try {
-    const landing = await get("https://www.facebook.com/", jar, null, opts);
-    const html = bodyOf(landing);
-    const $ = cheerio.load(html);
-    const loginForm = $("form").filter((_, el) => {
-      const action = String($(el).attr("action") || "");
-      return /login/i.test(action) || $(el).find('input[name="email"]').length || $(el).find('input[name="pass"]').length;
-    }).first();
-
-    if (!loginForm.length) throw new Error("Facebook login form not found");
-
-    const form = {};
-    loginForm.find("input[name]").each((_, el) => {
-      const name = String($(el).attr("name") || "");
-      if (name) form[name] = String($(el).attr("value") || "");
-    });
-    form.email = email;
-    form.pass = password;
-
-    const action = resolveAction(loginForm, "https://www.facebook.com/login/device-based/regular/login/?login_attempt=1&lwv=110");
-    logger(chalk.italic(`🔐 Local Facebook login: ${mask(email, 2)}`), "info");
-
-    let response = await post(action, jar, form, opts);
-    let body = bodyOf(response);
-    let currentUrl = responseUrl(response, action);
-
-    if (await hasUserCookie()) {
-      const cookies = await getAppState(jar);
-      logger(chalk.italic(`✅ Local Facebook login successful (${Date.now() - started}ms)`), "info");
-      return { ok: true, cookies, uid: cookies.find(c => c.key === "c_user" || c.key === "i_user")?.value || null };
-    }
-
-    // Facebook can return the approval/checkpoint form directly in the POST
-    // response; do not depend on a redirect URL being exposed by Axios.
-    if (isApprovalHtml(body) || /checkpoint|login-approval|approvals_code/i.test(currentUrl)) {
-      const handled = await submitApproval(body, currentUrl);
-      if (await hasUserCookie()) {
-        const cookies = await getAppState(jar);
-        logger(chalk.italic(`✅ Facebook 2FA login successful (${Date.now() - started}ms)`), "info");
-        return { ok: true, cookies, uid: cookies.find(c => c.key === "c_user" || c.key === "i_user")?.value || null };
-      }
-      if (handled?.body) body = handled.body;
-      currentUrl = handled?.url || currentUrl;
-    }
-
-    // A few Facebook flows expose the challenge only after loading the
-    // returned location. Try that location before declaring login failure.
-    if (currentUrl && /facebook\.com/i.test(currentUrl) && /checkpoint|login|approval/i.test(currentUrl)) {
-      const challenge = await get(currentUrl, jar, null, opts);
-      const challengeBody = bodyOf(challenge);
-      if (isApprovalHtml(challengeBody)) {
-        await submitApproval(challengeBody, responseUrl(challenge, currentUrl));
-      }
-    }
-
-    if (!await hasUserCookie()) {
-      const forms = formInfo(body);
-      const formSummary = forms.slice(0, 4).map(f => `${f.action || "?"}[${f.names.slice(0, 8).join(",")}]`).join(" | ");
-      const title = String(cheerio.load(body)("title").first().text() || "").replace(/\s+/g, " ").trim().slice(0, 120);
-      const status = response?.status || response?.statusCode || "?";
-      const reason = isApprovalHtml(body) ? "verification/challenge returned" : "no authenticated cookie returned";
-      throw new Error(`Facebook login failed (${reason}; HTTP ${status}; title="${title}"; url="${currentUrl || "?"}"; forms=${formSummary || "none"})`);
-    }
-
-    const cookies = await getAppState(jar);
-    logger(chalk.italic(`✅ Local Facebook login successful (${Date.now() - started}ms)`), "info");
-    return { ok: true, cookies, uid: cookies.find(c => c.key === "c_user" || c.key === "i_user")?.value || null };
-  } catch (error) {
-    const msg = error?.message || String(error);
-    logger(chalk.italic(`❌ Local Facebook login failed: ${msg}`), "error");
-    return { ok: false, message: msg, error: error?.error };
-  }
-}
-
-async function tokensViaAPI(email, password, twoFactor = null, globalOptions = {}) {
-  const res = await loginViaFacebookWeb(email, password, twoFactor, globalOptions);
-  return res.ok ? { status: true, cookies: res.cookies, uid: res.uid } : { status: false, message: res.message };
-}
-
 function normalizeCookieHeaderString(s) {
   let str = String(s || "").trim();
   if (!str) return [];
@@ -448,255 +244,35 @@ async function setJarCookies(j, appstate) {
   await Promise.all(tasks);
 }
 
-async function tokens(username, password, twofactor = null, globalOptions = {}) {
-  return tokensViaAPI(username, password, twofactor, globalOptions);
-}
-
-async function tokensWithOptions(username, password, twofactor = null, globalOptions = {}) {
-  return tokens(username, password, twofactor, globalOptions);
-}
-
 async function hydrateJarFromDB() {
   return false;
 }
 
 
-async function tryAutoLoginIfNeeded(currentHtml, currentCookies, globalOptions, ctxRef, hadAppStateInput = false, jar, twofactor = null) {
-  // Helper to validate UID - must be a non-zero positive number string
-  const isValidUID = uid => uid && uid !== "0" && /^\d+$/.test(uid) && parseInt(uid, 10) > 0;
-
-  const getUID = cs =>
-    cs.find(c => c.key === "i_user")?.value ||
-    cs.find(c => c.key === "c_user")?.value ||
-    cs.find(c => c.name === "i_user")?.value ||
-    cs.find(c => c.name === "c_user")?.value;
-  const htmlUID = body => {
-    const s = typeof body === "string" ? body : String(body ?? "");
-    return s.match(/"USER_ID"\s*:\s*"(\d+)"/)?.[1] || s.match(/\["CurrentUserInitialData",\[\],\{.*?"USER_ID":"(\d+)".*?\},\d+\]/)?.[1];
+async function tryAutoLoginIfNeeded(currentHtml, currentCookies, globalOptions, ctxRef, hadAppStateInput = false, jar) {
+  const isValidUID = uid => uid && uid !== "0" && /^\d+$/.test(String(uid)) && parseInt(uid, 10) > 0;
+  const getUID = cookies => {
+    const list = Array.isArray(cookies) ? cookies : [];
+    return list.find(c => c.key === "i_user")?.value ||
+      list.find(c => c.key === "c_user")?.value ||
+      list.find(c => c.name === "i_user")?.value ||
+      list.find(c => c.name === "c_user")?.value;
   };
-
-  let userID = getUID(currentCookies);
-  // Also try to extract userID from HTML if cookie userID is invalid
-  if (!isValidUID(userID)) {
-    userID = htmlUID(currentHtml);
-  }
-  // If we have a valid userID, return success
-  if (isValidUID(userID)) {
-    return { html: currentHtml, cookies: currentCookies, userID };
-  }
-
-  // No valid userID found - need to try auto-login
-  logger("tryAutoLoginIfNeeded: No valid userID found, attempting recovery...", "warn");
-
-  // If appState/Cookie was provided and is not checkpointed, try refresh
-  if (hadAppStateInput) {
-    const isCheckpoint = currentHtml.includes("/checkpoint/block/?next");
-    if (!isCheckpoint) {
-      try {
-        const refreshedCookies = await Promise.resolve(jar.getCookies("https://www.facebook.com"));
-        userID = getUID(refreshedCookies);
-        if (isValidUID(userID)) {
-          return { html: currentHtml, cookies: refreshedCookies, userID };
-        }
-      } catch { }
-    }
-  }
-
-  // Try to hydrate from DB backup
-  const hydrated = await hydrateJarFromDB(null, jar);
-  if (hydrated) {
-    logger("tryAutoLoginIfNeeded: Trying backup from DB...", "info");
+  const html = String(currentHtml ?? "");
+  const htmlUID = html.match(/"USER_ID"\s*:\s*"(\d+)"/)?.[1];
+  let userID = getUID(currentCookies) || htmlUID;
+  if (isValidUID(userID)) return { html: currentHtml, cookies: currentCookies, userID };
+  if (hadAppStateInput && jar) {
     try {
-      const initial = await get("https://www.facebook.com/", jar, null, globalOptions).then(saveCookies(jar));
-      const resB = (await ctxRef.bypassAutomation(initial, jar)) || initial;
-      const htmlB = resB && resB.data ? resB.data : "";
-      if (!htmlB.includes("/checkpoint/block/?next")) {
-        const htmlUserID = htmlUID(htmlB);
-        if (isValidUID(htmlUserID)) {
-          const cookiesB = await Promise.resolve(jar.getCookies("https://www.facebook.com"));
-          logger(`tryAutoLoginIfNeeded: DB backup session valid, USER_ID=${htmlUserID}`, "info");
-          return { html: htmlB, cookies: cookiesB, userID: htmlUserID };
-        } else {
-          logger(`tryAutoLoginIfNeeded: DB backup session dead (HTML USER_ID=${htmlUserID || "empty"}), will try local credential login...`, "warn");
-        }
-      }
-    } catch (dbErr) {
-      logger(`tryAutoLoginIfNeeded: DB backup failed - ${dbErr && dbErr.message ? dbErr.message : String(dbErr)}`, "warn");
-    }
+      const refreshedCookies = await Promise.resolve(jar.getCookies("https://www.facebook.com"));
+      userID = getUID(refreshedCookies);
+      if (isValidUID(userID)) return { html: currentHtml, cookies: refreshedCookies, userID };
+    } catch (_) {}
   }
-
-  // Check if auto-login is enabled (support both true and "true")
-  if (config.autoLogin === false || config.autoLogin === "false") {
-    throw new Error("AppState expired — Auto-login is disabled");
-  }
-
-  // Try local credential login
-  const u = config.credentials?.email || config.email;
-  const p = config.credentials?.password || config.password;
-  const tf = twofactor || config.credentials?.twofactor || config.twofactor || null;
-
-  if (!u || !p) {
-    logger("tryAutoLoginIfNeeded: No credentials configured for auto-login!", "error");
-    throw new Error("Missing credentials for auto-login (email/password not configured in fca-config.json)");
-  }
-
-  logger(`tryAutoLoginIfNeeded: Attempting local credential login for ${u.slice(0, 3)}***...`, "info");
-
-  const r = await tokensWithOptions(u, p, tf, globalOptions);
-  if (!r || !r.status) {
-    throw new Error(r && r.message ? r.message : "credential login failed");
-  }
-
-  logger(`tryAutoLoginIfNeeded: Local credential login successful! UID: ${r.uid}`, "info");
-
-  // Handle cookies - can be array, cookie string header, or both
-  let cookiePairs = [];
-  
-  // If cookies is a string (cookie header format), parse it
-  if (typeof r.cookies === "string") {
-    cookiePairs = normalizeCookieHeaderString(r.cookies);
-  } 
-  // If cookies is an array, convert to pairs
-  else if (Array.isArray(r.cookies)) {
-    cookiePairs = r.cookies.map(c => {
-      if (typeof c === "string") {
-        // Already in "key=value" format
-        return c;
-      } else if (c && typeof c === "object") {
-        // Object format {key, value} or {name, value}
-        return `${c.key || c.name}=${c.value}`;
-      }
-      return null;
-    }).filter(Boolean);
-  }
-  
-  // Also check for cookie field (alternative field name)
-  if (cookiePairs.length === 0 && r.cookie) {
-    if (typeof r.cookie === "string") {
-      cookiePairs = normalizeCookieHeaderString(r.cookie);
-    } else if (Array.isArray(r.cookie)) {
-      cookiePairs = r.cookie.map(c => {
-        if (typeof c === "string") return c;
-        if (c && typeof c === "object") return `${c.key || c.name}=${c.value}`;
-        return null;
-      }).filter(Boolean);
-    }
-  }
-
-  if (cookiePairs.length === 0) {
-    logger("tryAutoLoginIfNeeded: No cookies found in login response", "warn");
-    throw new Error("API login returned no cookies");
-  } else {
-    logger(`tryAutoLoginIfNeeded: Parsed ${cookiePairs.length} cookies from login response`, "info");
-    if (Array.isArray(r.cookies)) {
-      setJarFromAppState(jar, r.cookies);
-    } else {
-      setJarFromPairs(jar, cookiePairs, ".facebook.com");
-    }
-  }
-
-  // Wait a bit for cookies to be set
-  await new Promise(resolve => setTimeout(resolve, 500));
-
-  // Refresh Facebook page with new cookies - try multiple times if needed
-  // Try both www.facebook.com and m.facebook.com to ensure session is established
-  let html2 = "";
-  let res2 = null;
-  let retryCount = 0;
-  const maxRetries = 3;
-  const urlsToTry = ["https://m.facebook.com/", "https://www.facebook.com/"];
-
-  while (retryCount < maxRetries) {
-    try {
-      // Try m.facebook.com first (mobile version often works better for API login)
-      const urlToUse = retryCount === 0 ? urlsToTry[0] : urlsToTry[retryCount % urlsToTry.length];
-      logger(`tryAutoLoginIfNeeded: Refreshing ${urlToUse} (attempt ${retryCount + 1}/${maxRetries})...`, "info");
-      
-      const initial2 = await get(urlToUse, jar, null, globalOptions).then(saveCookies(jar));
-      res2 = (await ctxRef.bypassAutomation(initial2, jar)) || initial2;
-      html2 = res2 && res2.data ? res2.data : "";
-
-      if (html2.includes("/checkpoint/block/?next")) {
-        throw new Error("Checkpoint after API login");
-      }
-
-      // Check if HTML contains valid USER_ID
-      const htmlUserID = htmlUID(html2);
-      if (isValidUID(htmlUserID)) {
-        logger(`tryAutoLoginIfNeeded: Found valid USER_ID in HTML from ${urlToUse}: ${htmlUserID}`, "info");
-        break;
-      }
-
-      // If no valid USER_ID found, wait and retry with different URL
-      if (retryCount < maxRetries - 1) {
-        logger(`tryAutoLoginIfNeeded: No valid USER_ID in HTML from ${urlToUse} (attempt ${retryCount + 1}/${maxRetries}), retrying...`, "warn");
-        await new Promise(resolve => setTimeout(resolve, 1000 * (retryCount + 1)));
-        retryCount++;
-      } else {
-        logger("tryAutoLoginIfNeeded: No valid USER_ID found in HTML after retries", "warn");
-        break;
-      }
-    } catch (err) {
-      if (err.message && err.message.includes("Checkpoint")) {
-        throw err;
-      }
-      if (retryCount < maxRetries - 1) {
-        logger(`tryAutoLoginIfNeeded: Error refreshing page (attempt ${retryCount + 1}/${maxRetries}): ${err && err.message ? err.message : String(err)}`, "warn");
-        await new Promise(resolve => setTimeout(resolve, 1000 * (retryCount + 1)));
-        retryCount++;
-      } else {
-        throw err;
-      }
-    }
-  }
-
-  const cookies2 = await Promise.resolve(jar.getCookies("https://www.facebook.com"));
-  const uid2 = getUID(cookies2);
-  const htmlUserID2 = htmlUID(html2);
-
-  // Prioritize USER_ID from HTML over cookies (more reliable)
-  let finalUID = null;
-  if (isValidUID(htmlUserID2)) {
-    finalUID = htmlUserID2;
-    logger(`tryAutoLoginIfNeeded: Using USER_ID from HTML: ${finalUID}`, "info");
-  } else if (isValidUID(uid2)) {
-    finalUID = uid2;
-    logger(`tryAutoLoginIfNeeded: Using USER_ID from cookies: ${finalUID}`, "info");
-  } else if (isValidUID(r.uid)) {
-    finalUID = r.uid;
-    logger(`tryAutoLoginIfNeeded: Using USER_ID from login response: ${finalUID}`, "info");
-  }
-
-  if (!isValidUID(finalUID)) {
-    logger(`tryAutoLoginIfNeeded: HTML check - USER_ID from HTML: ${htmlUserID2 || "none"}, from cookies: ${uid2 || "none"}, from API: ${r.uid || "none"}`, "error");
-    throw new Error("Login failed - could not get valid userID after API login. HTML may indicate session is not established.");
-  }
-
-  // Final validation: ensure HTML shows we're logged in
-  if (!isValidUID(htmlUserID2)) {
-    logger("tryAutoLoginIfNeeded: WARNING - HTML does not show valid USER_ID, but proceeding with cookie-based UID", "warn");
-  }
-
-  return { html: html2, cookies: cookies2, userID: finalUID };
+  throw new Error("AppState expired or invalid; credential login is disabled");
 }
 
-function makeLogin(j, email, password, globalOptions, twofactor = null) {
-  return async function () {
-    const u = email || config.credentials?.email;
-    const p = password || config.credentials?.password;
-    const tf = twofactor || config.credentials?.twofactor || config.twofactor || null;
-    if (!u || !p) return;
-    const r = await tokensWithOptions(u, p, tf, globalOptions);
-    if (r && r.status && Array.isArray(r.cookies)) {
-      setJarFromAppState(j, r.cookies);
-      await get("https://www.facebook.com/", j, null, globalOptions).then(saveCookies(j));
-    } else {
-      throw new Error(r && r.message ? r.message : "Login failed");
-    }
-  };
-}
-
-function loginHelper(appState, Cookie, email, password, globalOptions, callback, prCallback, twofactor = null) {
+function loginHelper(appState, Cookie, _legacyEmail, _legacyPassword, globalOptions, callback, prCallback, _legacyTwofactor = null) {
   try {
     // Each call to loginHelper() (i.e. each login()/account) gets its own,
     // isolated CookieJar instead of sharing one process-wide singleton.
@@ -848,13 +424,7 @@ function loginHelper(appState, Cookie, email, password, globalOptions, callback,
         const initial = await get("https://www.facebook.com/", jar, null, globalOptions).then(saveCookies(jar));
         return (await ctx.bypassAutomation(initial, jar)) || initial;
       }
-      logger(chalk.italic("😐 AppState expired — logging in with credentials..."), "warn");
-      return get("https://www.facebook.com/", null, null, globalOptions)
-        .then(saveCookies(jar))
-        .then(makeLogin(jar, email, password, globalOptions, twofactor))
-        .then(function () {
-          return get("https://www.facebook.com/", jar, null, globalOptions).then(saveCookies(jar));
-        });
+      throw new Error("AppState is required; credential login is disabled");
     })()
       .then(async function (res) {
         const ctx = {};
@@ -1096,52 +666,11 @@ function loginHelper(appState, Cookie, email, password, globalOptions, callback,
         ctxMain.bypassAutomation = ctx.bypassAutomation.bind(ctxMain);
         ctxMain.performAutoLogin = async () => {
           try {
-            // still usable. A checkpoint/redirect seen on one request
-            // doesn't always mean the whole session is dead (transient FB
-            // blips, rate limiting, etc). Cookie/appstate-only logins have
-            // no email+password to re-login with, so without this check a
-            // single false-positive checkpoint would permanently tear down
-            // the bot (via emitAuth) and force a brand new cookie every
-            // time instead of just continuing on the still-good session.
-            try {
-              // hiccup during THIS check alone used to be treated the same
-              // as a dead session and fall through to requiring credentials.
-              let stillCheckpointed = true;
-              let uid = null;
-              for (let attempt = 0; attempt < 3 && !uid; attempt++) {
-                try {
-                  const check = await get("https://www.facebook.com/", jar, null, globalOptions).then(saveCookies(jar));
-                  const html = check && check.data ? String(check.data) : "";
-                  stillCheckpointed = html.includes("/checkpoint/block/?next") || html.includes("XCheckpointFBScrapingWarningController");
-                  const uidMatch = html.match(/"USER_ID"\s*:\s*"(\d+)"/);
-                  if (!stillCheckpointed && uidMatch && uidMatch[1] && uidMatch[1] !== "0") {
-                    uid = uidMatch[1];
-                    break;
-                  }
-                } catch {
-                  // network hiccup on this attempt - retry below instead of
-                  // immediately assuming the session is dead
-                }
-                if (!uid && attempt < 2) await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
-              }
-              if (uid) {
-                logger("performAutoLogin: existing cookie session is still valid, continuing without re-login", "info");
-                return true;
-              }
-            } catch {
-              // Self-check failed (network hiccup, etc) - fall through to credential-based login below.
-            }
-
-            const u = config.credentials?.email || email;
-            const p = config.credentials?.password || password;
-            const tf = twofactor || config.credentials?.twofactor || config.twofactor || null;
-            if (!u || !p) return false;
-            const r = await tokensWithOptions(u, p, tf, globalOptions);
-            if (!(r && r.status && Array.isArray(r.cookies))) return false;
-            setJarFromAppState(jar, r.cookies);
-            await get("https://www.facebook.com/", jar, null, globalOptions).then(saveCookies(jar));
-            return true;
-          } catch {
+            const check = await get("https://www.facebook.com/", jar, null, globalOptions).then(saveCookies(jar));
+            const html = check && check.data ? String(check.data) : "";
+            const uid = html.match(/"USER_ID"\s*:\s*"(\d+)"/)?.[1];
+            return Boolean(uid && uid !== "0");
+          } catch (_) {
             return false;
           }
         };
@@ -1291,9 +820,6 @@ function loginHelper(appState, Cookie, email, password, globalOptions, callback,
 
 module.exports = loginHelper;
 module.exports.loginHelper = loginHelper;
-module.exports.tokensViaAPI = tokensViaAPI;
-module.exports.loginViaAPI = loginViaFacebookWeb;
-module.exports.tokens = tokens;
 module.exports.normalizeCookieHeaderString = normalizeCookieHeaderString;
 module.exports.setJarFromPairs = setJarFromPairs;
 module.exports.setJarFromAppState = setJarFromAppState;

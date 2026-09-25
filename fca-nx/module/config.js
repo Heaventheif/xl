@@ -4,8 +4,7 @@ const logger = require("../func/logger");
 const defaultConfig = {
   autoUpdate: true,
   mqtt: { enabled: true, reconnectInterval: 3600 },
-  autoLogin: true,
-  credentials: { email: "", password: "", twofactor: "" },
+  autoLogin: false,
   antiGetInfo: {
     AntiGetThreadInfo: false,
     AntiGetUserInfo: false

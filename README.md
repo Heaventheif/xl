@@ -25,7 +25,7 @@ The application starts from `index.js`.
 - **Node.js:** `>= 20`
 - **npm:** compatible with your Node.js installation
 - **MongoDB:** recommended for persistent AppState and bot data across restarts/deploys
-- A valid **Facebook AppState** for the FCA login flow, or `FACEBOOK_EMAIL` + `FACEBOOK_PASSWORD` as automatic fallback
+- A valid **Facebook AppState** for the FCA login flow; email/password login is disabled
 
 Check your Node.js version:
 
@@ -77,9 +77,6 @@ Common variables used by the project include:
 | `APPSTATE_SYNC_ENV` | Keep refreshed AppState in `process.env` (`false` by default) |
 | `APPSTATE_REQUIRE_ENCRYPTION` | Require encrypted AppState persistence (`true` in production by default) |
 | `APPSTATE_ENCRYPTION_KEY` | Encryption key required for encrypted local/Mongo AppState persistence |
-| `FACEBOOK_EMAIL` | Optional fallback login email |
-| `FACEBOOK_PASSWORD` | Optional fallback login password |
-| `FACEBOOK_2FA` | Optional Base32 TOTP secret; code is generated locally |
 | `MONGO_URI` | MongoDB connection URI |
 | `MONGODB_URI` | Alternate MongoDB URI variable supported by the project |
 | `MONGO_DB_NAME` | MongoDB database name |
@@ -92,7 +89,7 @@ Common variables used by the project include:
 | `MAX_CONCURRENT_COMMANDS` | Optional command concurrency limit |
 | `DEV` | Development/runtime flag |
 
-> Do not commit `.env`, AppState data, cookies, API keys, Facebook email/password, or other secrets to a public repository.
+> Do not commit `.env`, AppState data, cookies, API keys, or other secrets to a public repository.
 
 ### Example `.env`
 
@@ -104,12 +101,9 @@ APPSTATE_ENCRYPTION_KEY=<long-random-secret>
 MONGO_URI=mongodb://127.0.0.1:27017
 MONGO_DB_NAME=sunkenbot
 TZ=Europe/Berlin
-FACEBOOK_EMAIL=
-FACEBOOK_PASSWORD=
-FACEBOOK_2FA=
 ```
 
-Use your real credentials locally. The example above is intentionally incomplete.
+Use a valid AppState locally. Email/password and TOTP login are intentionally disabled.
 
 ---
 
@@ -307,7 +301,7 @@ APPSTATE / appstate.json
         └── MongoDB bot_appstate (encrypted backup when configured)
 ```
 
-A successful credential login uses `FACEBOOK_EMAIL`, `FACEBOOK_PASSWORD`, and the local `FACEBOOK_2FA` Base32 TOTP secret when Facebook requests 2FA. Refreshed cookies are saved automatically, so the operator does not need to manually replace AppState after every successful refresh. Cookie expiration dates are not artificially extended; the bot only persists values actually present in Facebook's authenticated CookieJar.
+The bot accepts AppState only. Refreshed cookies are saved automatically when Facebook returns them; cookie expiration dates are not artificially extended.
 
 For persistent deployments, configure MongoDB together with `APPSTATE_ENCRYPTION_KEY`. Keep `appstate.json` and `.appstate.enc` out of Git.
 
@@ -477,11 +471,9 @@ private tokens
 
 Use environment variables or another secure secret-management mechanism.
 
-### Automatic auth recovery
+### Authentication recovery
 
-The bot prefers `APPSTATE`. If Facebook later reports an authentication failure such as `login_blocked`, the MQTT manager stops retry-looping and invokes the auth recovery path. When `FACEBOOK_EMAIL` and `FACEBOOK_PASSWORD` are configured, the bot attempts a fresh login, persists the new AppState, and rebuilds the bot lifecycle. If fallback credentials are unavailable or fail, the manager enters a long cooldown instead of reconnecting repeatedly.
-
-`FACEBOOK_EMAIL` and `FACEBOOK_PASSWORD` are optional secrets. They must be supplied through the environment/secrets store and never committed to the repository.
+The bot accepts AppState only. If Facebook reports an authentication failure such as `login_blocked`, the MQTT manager stops retry-looping and enters its configured cooldown. Restore the session by supplying a new valid AppState; password/email login is disabled.
 
 ### AppState
 
@@ -573,15 +565,6 @@ For issues and feature requests, use the project's issue tracker or repository d
 
 ## تسجيل الدخول وتجديد AppState
 
-يمكن تشغيل الدخول الاحتياطي محليًا عبر `FACEBOOK_EMAIL` و`FACEBOOK_PASSWORD`.
-إذا كان الحساب يستخدم تطبيق مصادقة TOTP، ضع المفتاح السري Base32 في `FACEBOOK_2FA` أو `FB_2FA`.
-المشروع يستخدم `totp-generator` محليًا لإنشاء رمز TOTP؛ لا يحتاج مولد الرمز إلى خادم أو API خارجي.
+يستخدم المشروع **AppState فقط** لتسجيل الدخول. مسار email/password وTOTP معطّل عمداً.
 
-```env
-FACEBOOK_EMAIL=your@email.com
-FACEBOOK_PASSWORD=your-password
-FACEBOOK_2FA=BASE32_TOTP_SECRET
-```
-
-عند نجاح تسجيل الدخول يتم استخراج AppState من Cookie Jar المحلي وحفظه عبر نظام AppState الموجود في المشروع.
-لا تضع كلمة السر أو مفتاح TOTP داخل Git.
+عند نجاح الاتصال يتم حفظ AppState المحدّث عبر نظام التخزين المشفّر الموجود في المشروع.

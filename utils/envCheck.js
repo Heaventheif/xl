@@ -15,15 +15,14 @@ function hasAnyAppStateFile(projectRoot) {
 function buildChecks(projectRoot) {
     return [ {
         level: "warn",
-        key: null,
-        label: "FB credentials",
+        key: "APPSTATE",
+        label: "APPSTATE",
         test: () => Boolean(
             process.env.APPSTATE?.trim() ||
-            (process.env.FACEBOOK_EMAIL?.trim() && process.env.FACEBOOK_PASSWORD) ||
             (process.env.APPSTATE_FILE && fs.existsSync(path.resolve(projectRoot, process.env.APPSTATE_FILE))) ||
             hasAnyAppStateFile(projectRoot)
         ),
-        message: "لا يوجد AppState أو email/password صالحان — ضع appstate.json أو متغيرات FACEBOOK_EMAIL/FACEBOOK_PASSWORD."
+        message: "لا يوجد AppState صالح — ضع APPSTATE أو appstate.json."
     }, {
         level: "warn",
         key: "HF_SPACE_URL",
@@ -52,14 +51,10 @@ export function checkEnv(projectRoot) {
         }
     }
     if (hasCritical) {
-        console.error("[ENV] أضف APPSTATE صالحاً أو FACEBOOK_EMAIL/FACEBOOK_PASSWORD إلى متغيرات البيئة قبل التشغيل");
+        console.error("[ENV] أضف APPSTATE صالحاً أو appstate.json قبل التشغيل");
     }
 }
 
-const hasFallbackAuth = Boolean(process.env.FACEBOOK_EMAIL && process.env.FACEBOOK_PASSWORD);
-if (process.env.FACEBOOK_EMAIL && !process.env.FACEBOOK_PASSWORD) console.warn("[ENV] ⚠️ FACEBOOK_EMAIL موجود بدون FACEBOOK_PASSWORD");
-if (process.env.FACEBOOK_PASSWORD && !process.env.FACEBOOK_EMAIL) console.warn("[ENV] ⚠️ FACEBOOK_PASSWORD موجود بدون FACEBOOK_EMAIL");
-if (hasFallbackAuth) console.log("[ENV] ℹ️ تسجيل الدخول الاحتياطي email/password مفعّل");
 
 export const $plugin = {
     name: "xx-utils-env-check",
