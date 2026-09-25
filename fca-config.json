@@ -31,8 +31,8 @@
     "pingIntervalMs": 240000,
     "reconnectBaseMs": 5000,
     "reconnectCapMs": 120000,
-    "cooldownMs": 1200000,
-    "authBlockCooldownMs": 5400000,
+    "cooldownMs": 180000,
+    "authBlockCooldownMs": 180000,
     "maxFastAttempts": 6
   }
 }

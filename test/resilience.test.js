@@ -35,6 +35,32 @@ test("MQTT manager drains buffered events in arrival order", async () => {
   assert.equal(manager.eventsDropped, 0);
 });
 
+test("MQTT manager reconnects after a transport error", async () => {
+  let callback;
+  let connections = 0;
+  const api = {
+    listenMqtt(cb) {
+      connections++;
+      callback = cb;
+      return { stopListening: async () => {} };
+    },
+  };
+  const manager = new MqttConnectionManager(api, {
+    reconnectBaseMs: 1,
+    reconnectCapMs: 1,
+    watchdogIntervalMs: 60_000,
+    pingIntervalMs: 60_000,
+  });
+
+  manager.start();
+  await wait(5);
+  callback(new Error("socket closed"));
+  await wait(650);
+  await manager.stop();
+
+  assert.ok(connections >= 2, `expected reconnect, got ${connections} connection(s)`);
+});
+
 test("AppState persistence preserves the existing datr fingerprint", () => {
   const previous = [{ key: "datr", value: "stable-device" }];
   const next = [{ key: "datr", value: "new-device" }, { key: "c_user", value: "1" }];

@@ -48,9 +48,9 @@ const MQTT_DEFAULTS = {
     cycleMs: CYCLE_MS_DEFAULT,
     reconnectDelayMs: RECONNECT_DELAY_MS_DEFAULT,
     autoReconnect: true,
-    reconnectAfterStop: false,
+    reconnectAfterStop: true,
     maxReconnectAttempts: MAX_MQTT_RECONNECT_ATTEMPTS,
-    reconnectCooldownMs: MAX_MQTT_RECONNECT_COOLDOWN_MS,
+    reconnectCooldownMs: 3 * 60 * 1000,
     connectTimeoutMs: CONNECT_TIMEOUT_MS,
     tmsWaitTimeoutMs: TMS_WAIT_TIMEOUT_MS,
 };

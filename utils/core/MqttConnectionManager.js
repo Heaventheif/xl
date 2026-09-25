@@ -7,7 +7,7 @@ const DEFAULTS = {
   stableWindowMs: 5 * 60_000,
   reconnectBaseMs: 2_000,
   reconnectCapMs: 5 * 60_000,
-  cooldownMs: 15 * 60_000,
+  cooldownMs: 3 * 60_000,
   authBlockCooldownMs: 90 * 60_000,  // ← 90 دقيقة انتظار عند login_blocked
   maxFastAttempts: 10,
   pingIntervalMs: 240_000,
@@ -62,6 +62,8 @@ export class MqttConnectionManager extends EventEmitter {
     this.watchdogTimer = null;
     this.pingTimer = null;
     this.authRetryTimer = null;
+    this.cooldownRetryTimer = null;
+    this.cooldownRetryTimer = null;
     this._authBlockedUntil = null;
     this.cooldownUntil = 0;
     this.connectedSince = 0;
@@ -109,6 +111,7 @@ export class MqttConnectionManager extends EventEmitter {
     clearTimeout(this.watchdogTimer);
     clearTimeout(this.pingTimer);
     clearTimeout(this.authRetryTimer);
+    clearTimeout(this.cooldownRetryTimer);
     this.watchdogTimer = null;
     this.pingTimer = null;
     this.authRetryTimer = null;
@@ -278,6 +281,14 @@ export class MqttConnectionManager extends EventEmitter {
     if (Date.now() < this.cooldownUntil) {
       this.state = "RECONNECT_WAIT";
       this._emitState();
+      if (!this.cooldownRetryTimer) {
+        const remaining = Math.max(1000, this.cooldownUntil - Date.now());
+        this.cooldownRetryTimer = setTimeout(() => {
+          this.cooldownRetryTimer = null;
+          if (!this.stopped) void this.reconnect("cooldown_retry");
+        }, remaining);
+        this.cooldownRetryTimer.unref?.();
+      }
       return false;
     }
 
@@ -303,6 +314,12 @@ export class MqttConnectionManager extends EventEmitter {
       this.cooldownUntil = Date.now() + cooldownMs;
       this.state = "RECONNECT_WAIT";
       this.emit("cooldown", { ...this.health(), cooldownMs });
+      clearTimeout(this.cooldownRetryTimer);
+      this.cooldownRetryTimer = setTimeout(() => {
+        this.cooldownRetryTimer = null;
+        if (!this.stopped) void this.reconnect("cooldown_retry");
+      }, cooldownMs);
+      this.cooldownRetryTimer.unref?.();
     }
     return ok;
   }
@@ -389,6 +406,11 @@ export class MqttConnectionManager extends EventEmitter {
     if (errorClass === "AUTH_FAILED") this.state = "AUTH_FAILED";
     else if (this.state !== "STOPPED") this.state = "DEGRADED";
     this.emit("error_observed", { errorClass, message, at: this.lastErrorAt });
+    if (!this.stopped && !this.reconnectPromise && errorClass !== "EVENT_HANDLER") {
+      setImmediate(() => {
+        if (!this.stopped) void this.reconnect(`error:${errorClass.toLowerCase()}`);
+      });
+    }
     if (this.consecutiveErrors === this.options.structuralAlertThreshold) {
       const alert = {
         type: "structural_error_threshold",
@@ -426,6 +448,7 @@ export class MqttConnectionManager extends EventEmitter {
         if (!settling && !transportAlive) {
           this.state = "DEGRADED";
           this.lastReconnectReason = "transport_lost";
+          void this.reconnect("watchdog_transport_lost");
         } else if (!settling && staleFor >= this.options.staleAfterMs && transportAlive) {
           this.state = "CONNECTED";
         }
@@ -457,6 +480,7 @@ export class MqttConnectionManager extends EventEmitter {
       else if (this.state !== "AUTH_FAILED") {
         this.state = "DEGRADED";
         this.lastReconnectReason = "transport_unavailable";
+        void this.reconnect("ping_transport_unavailable");
       }
       this._schedulePing();
     }, this.options.pingIntervalMs);
