@@ -103,18 +103,9 @@ function publishLsRequestWithAck(mqttClient, content, requestId, timeout) {
         }
 
         mqttClient.on('message', onMessage);
-        try {
-            // /ls_req does not need MQTT packet-level QoS here because we
-            // already wait for Facebook's /ls_resp application-level ack.
-            // Using QoS 1 forces mqtt.js to touch its outgoing packet store;
-            // on some long-lived sessions that store can be torn down during
-            // a reconnect and publish() then throws a cryptic null.set error.
-            mqttClient.publish('/ls_req', JSON.stringify(content), { qos: 0, retain: false }, err => {
-                if (err) finish(err);
-            });
-        } catch (err) {
-            finish(err instanceof Error ? err : new Error(String(err)));
-        }
+        mqttClient.publish('/ls_req', JSON.stringify(content), { qos: 0 }, err => {
+            if (err) finish(err);
+        });
     });
 }
 
@@ -128,9 +119,7 @@ module.exports = function (defaultFuncs, api, ctx) {
 
     async function sendViaMqtt(msg, threadID, replyToMessage) {
         var mqttClient = ctx.mqttClient || global.mqttClient;
-        if (!mqttClient || mqttClient.connected !== true) {
-            throw new Error('MQTT client not connected');
-        }
+        if (!mqttClient) throw new Error('MQTT client not available');
 
         var baseBody = msg.body != null ? String(msg.body) : "";
         // [Fixed] Use shared ctx counter (same as sendTypingIndicator/changeAdminStatus)

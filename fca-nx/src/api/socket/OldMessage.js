@@ -11,14 +11,25 @@ var allowedProperties = {
 
 module.exports = function (defaultFuncs, api, ctx) {
 
-    // Reuse the session-scoped uploader used by the normal sendMessage path.
-    // The previous implementation duplicated the legacy upload.php request
-    // here, which made MQTT fallback depend on a second, more fragile upload
-    // implementation. One uploader also keeps cookie/token handling aligned.
-    var uploadAttachmentFn = require('../messaging/uploadAttachment')(defaultFuncs, api, ctx);
-
     function uploadAttachment(attachments, callback) {
-        uploadAttachmentFn(attachments)
+        var uploads = [];
+        for (var i = 0; i < attachments.length; i++) {
+            if (!utils.isReadableStream(attachments[i])) {
+                return callback({ error: "Attachment must be a readable stream." });
+            }
+            uploads.push(
+                defaultFuncs.postFormData("https://upload.facebook.com/ajax/mercury/upload.php", ctx.jar, {
+                    upload_1024: attachments[i],
+                    voice_clip: "true"
+                })
+                    .then(utils.parseAndCheckLogin(ctx, defaultFuncs))
+                    .then(resData => {
+                        if (resData.error) throw resData;
+                        return resData.payload.metadata[0];
+                    })
+            );
+        }
+        bluebird.all(uploads)
             .then(resData => callback(null, resData))
             .catch(err => { logger.error("OldMessage.upload", err); callback(err); });
     }
