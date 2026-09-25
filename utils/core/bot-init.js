@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import { getMqttConfig, getSessionConfig } from "../fcaConfig.js";
 const _require = createRequire(import.meta.url);
 
 // ── تحميل attachThreadInfoRealtimeSync من fca-nx ─────────────────────────────
