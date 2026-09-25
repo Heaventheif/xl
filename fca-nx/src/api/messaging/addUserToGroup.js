@@ -56,7 +56,7 @@ module.exports = function (defaultFuncs, api, ctx) {
         resolve({ success: true, response: jsonMsg.payload });
       };
       ctx.mqttClient.on("message", handleRes);
-      ctx.mqttClient.publish("/ls_req", form, { qos: 1, retain: false }, (err) => {
+      ctx.mqttClient.publish("/ls_req", form, { qos: 0, retain: false }, (err) => {
         if (err) {
           ctx.mqttClient.removeListener("message", handleRes);
           callback?.(err);

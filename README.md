@@ -24,8 +24,8 @@ The application starts from `index.js`.
 
 - **Node.js:** `>= 20`
 - **npm:** compatible with your Node.js installation
-- **MongoDB:** recommended for persistent database-backed features
-- A valid **Facebook AppState** for the FCA login flow
+- **MongoDB:** recommended for persistent AppState and bot data across restarts/deploys
+- A valid **Facebook AppState** for the FCA login flow, or `FACEBOOK_EMAIL` + `FACEBOOK_PASSWORD` as automatic fallback
 
 Check your Node.js version:
 
@@ -71,10 +71,13 @@ Common variables used by the project include:
 | Variable | Purpose |
 |---|---|
 | `APPSTATE` | Facebook AppState used for login |
-| `APPSTATE_FILE` | Optional AppState file location |
-| `APPSTATE_ENCRYPTION_KEY` | Optional encryption key for persisted AppState |
+| `APPSTATE_FILE` | AppState bootstrap/persistence file; defaults to `appstate.json` |
+| `APPSTATE_WRITE_FILE` | Write the refreshed AppState back to `APPSTATE_FILE` (`true` by default) |
+| `APPSTATE_PERSIST_FILE` | Optional encrypted local backup file; defaults to `.appstate.enc` |
+| `APPSTATE_ENCRYPTION_KEY` | Encryption key required for encrypted local/Mongo AppState persistence |
 | `FACEBOOK_EMAIL` | Optional fallback login email |
 | `FACEBOOK_PASSWORD` | Optional fallback login password |
+| `FACEBOOK_2FA` | Optional Base32 TOTP secret; code is generated locally |
 | `MONGO_URI` | MongoDB connection URI |
 | `MONGODB_URI` | Alternate MongoDB URI variable supported by the project |
 | `MONGO_DB_NAME` | MongoDB database name |
@@ -92,10 +95,16 @@ Common variables used by the project include:
 ### Example `.env`
 
 ```env
-APPSTATE='[...]'
+APPSTATE_FILE=appstate.json
+APPSTATE_WRITE_FILE=true
+APPSTATE_PERSIST_FILE=.appstate.enc
+APPSTATE_ENCRYPTION_KEY=<long-random-secret>
 MONGO_URI=mongodb://127.0.0.1:27017
 MONGO_DB_NAME=sunkenbot
 TZ=Europe/Berlin
+FACEBOOK_EMAIL=
+FACEBOOK_PASSWORD=
+FACEBOOK_2FA=
 ```
 
 Use your real credentials locally. The example above is intentionally incomplete.
@@ -283,6 +292,25 @@ Axios provides a consistent interface for:
 
 ---
 
+## AppState persistence and session longevity
+
+The active session is kept in the live FCA CookieJar and persisted when it actually changes:
+
+```text
+APPSTATE / appstate.json
+        │
+        ├── live CookieJar
+        ├── appstate.json (direct persistence)
+        ├── .appstate.enc (encrypted local backup)
+        └── MongoDB bot_appstate (encrypted backup when configured)
+```
+
+A successful credential login uses `FACEBOOK_EMAIL`, `FACEBOOK_PASSWORD`, and the local `FACEBOOK_2FA` Base32 TOTP secret when Facebook requests 2FA. Refreshed cookies are saved automatically, so the operator does not need to manually replace AppState after every successful refresh. Cookie expiration dates are not artificially extended; the bot only persists values actually present in Facebook's authenticated CookieJar.
+
+For persistent deployments, configure MongoDB together with `APPSTATE_ENCRYPTION_KEY`. Keep `appstate.json` and `.appstate.enc` out of Git.
+
+---
+
 ## Session keep-alive
 
 Session management is handled by:
@@ -326,7 +354,7 @@ The database layer is located at:
 db/index.js
 ```
 
-The project does not require SQLite and does not create a local SQLite database.
+`fca-nx` no longer depends on Sequelize or SQLite. Its user/thread layer is a bounded in-memory cache because Facebook can be queried again for this metadata; MongoDB is reserved for durable SunkenBot state such as bans and encrypted AppState. This removes a native SQLite build dependency and avoids maintaining two competing persistent databases.
 
 Set the database connection with:
 
@@ -539,3 +567,19 @@ Third-party services, APIs, authentication systems, and platform behavior can ch
 **SunkenBot**
 
 For issues and feature requests, use the project's issue tracker or repository discussions.
+
+
+## تسجيل الدخول وتجديد AppState
+
+يمكن تشغيل الدخول الاحتياطي محليًا عبر `FACEBOOK_EMAIL` و`FACEBOOK_PASSWORD`.
+إذا كان الحساب يستخدم تطبيق مصادقة TOTP، ضع المفتاح السري Base32 في `FACEBOOK_2FA` أو `FB_2FA`.
+المشروع يستخدم `totp-generator` محليًا لإنشاء رمز TOTP؛ لا يحتاج مولد الرمز إلى خادم أو API خارجي.
+
+```env
+FACEBOOK_EMAIL=your@email.com
+FACEBOOK_PASSWORD=your-password
+FACEBOOK_2FA=BASE32_TOTP_SECRET
+```
+
+عند نجاح تسجيل الدخول يتم استخراج AppState من Cookie Jar المحلي وحفظه عبر نظام AppState الموجود في المشروع.
+لا تضع كلمة السر أو مفتاح TOTP داخل Git.

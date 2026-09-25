@@ -1,16 +1,12 @@
 
 import { EventEmitter } from "node:events";
-import { Agent as HttpsAgent } from "node:https";
-import axios from "axios";
 import {
   checkAppStateExpiry,
   persistAppState,
-  extendCookieExpiry,
 } from "../appStatePersist.js";
 
 const KEEP_ALIVE_INTERVAL_MS  = 13 * 60 * 1_000;
 
-const HEALTH_CHECK_RELAXED_MS = 45 * 60 * 1_000;
 const HEALTH_CHECK_NORMAL_MS  = 20 * 60 * 1_000;
 const HEALTH_CHECK_URGENT_MS  = 10 * 60 * 1_000;
 
@@ -22,28 +18,15 @@ const MAX_CONSECUTIVE_FAILS = 5;
 const CIRCUIT_BREAKER_MS    = 45 * 60 * 1_000;
 
 /** [FIX-4] نقطة keep-alive تُحافظ على الجلسة دون تسجيل نشاط مرئي */
-const KEEPALIVE_ENDPOINT = "https://www.facebook.com/messages/";
+const KEEPALIVE_ENDPOINT = "https://www.facebook.com/";
 
-/** User-Agent موحَّد */
-const UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-  "AppleWebKit/537.36 (KHTML, like Gecko) " +
-  "Chrome/127.0.0.0 Safari/537.36";
-
-// اتصال HTTP طويل العمر خاص بطلبات keep-alive/warmup.
-const KEEPALIVE_AGENT = new HttpsAgent({
-  keepAlive: true,
-  maxSockets: 4,
-  maxFreeSockets: 2,
-  timeout: 30_000,
-});
 
 // ─────────────────────────────────────────────────────────────────────────────
 
 export class SessionExtender extends EventEmitter {
   /**
    * @param {object}   opts
-   * @param {object}   opts.api              — كائن api من fca-eryxenx
+   * @param {object}   opts.api              — كائن api من fca-nx
    * @param {number}   opts.botIndex
    * @param {object}   [opts.cookieRefresher]
    * @param {object}   [opts.sessionGuard]
@@ -167,11 +150,11 @@ export class SessionExtender extends EventEmitter {
   _scheduleKeepAlive() {
     if (!this._running) return;
 
-    // [FIX-3] أول ping بعد 3 دقائق (ليس 60 دقيقة)
-    // [FIX-6] jitter ±3 دقائق فقط (ليس ±20 دقيقة التي كانت تُتيح تجاوز عمر الجلسة)
+    // أول keep-alive مبكر للتأكد من الجلسة، ثم cadence ثابت تقريباً.
+    // jitter صغير يمنع التوقيت الصلب من دون فتح فجوة طويلة.
     const initial = this._keepAlives === 0
-      ? 3 * 60 * 1_000
-      : this._keepAliveMs + (Math.random() * 6 - 3) * 60_000;
+      ? 2 * 60 * 1_000
+      : this._keepAliveMs + (Math.random() * 60 - 30) * 1_000;
 
     this._keepAliveTimer = setTimeout(() => {
       this._doKeepAlive(false).finally(() => this._scheduleKeepAlive());
@@ -222,11 +205,12 @@ export class SessionExtender extends EventEmitter {
       }
 
       if (critical) {
-        console.error(`[EXTENDER:${label}] 🚨 حالة حرجة! تجديد فوري...`);
+        console.error(`[EXTENDER:${label}] 🚨 حالة حرجة! محاولة استرداد تلقائي...`);
         this._sessionHealthy = false;
-        this._onCritical?.({ botIndex: this._botIndex, expiresAt });
         this.emit("critical", { expiresAt, criticalCookies: expiryStatus.criticalCookies });
-        await this._refreshSession(expiresAt, manual, true);
+        let recovered = false;
+        try { recovered = Boolean(await this._onCritical?.({ botIndex: this._botIndex, expiresAt, criticalCookies: expiryStatus.criticalCookies })); } catch (_) {}
+        if (!recovered) await this._refreshSession(expiresAt, manual, true);
       } else if (expiring || manual) {
         await this._refreshSession(expiresAt, manual, false);
       }
@@ -247,15 +231,6 @@ export class SessionExtender extends EventEmitter {
     return state?.filter(c => c?.key && c?.value).map(c => `${c.key}=${c.value}`).join("; ") || "";
   }
 
-  async _fbPing(url, cookieStr) {
-    const resp = await axios.get(url, {
-      timeout: 20_000, httpsAgent: KEEPALIVE_AGENT, maxRedirects: 5,
-      validateStatus: () => true, responseType: "stream",
-      headers: { Cookie: cookieStr, "User-Agent": UA, Accept: "text/html,*/*;q=0.8", "Connection": "keep-alive" }
-    });
-    resp.data?.resume?.();
-    return resp.status;
-  }
 
   // ── keep-alive عبر Axios مع اتصال HTTP keep-alive ── [FIX-4] ───────────────────────────────────
   /**
@@ -264,57 +239,29 @@ export class SessionExtender extends EventEmitter {
    */
   async _doKeepAlive(manual = false) {
     const label = this._label;
+    const funcs = this._api?.__defaultFuncs;
+    const ctx = this._api?.__ctx;
 
-    let state;
-    try { state = this._api?.getAppState?.(); } catch (_) {}
-
-    if (!state?.length) {
-      // [FIX-4] تحذير واضح بدل الصمت
-      console.warn(`[EXTENDER:${label}] ⚠️ keep-alive: لا يوجد AppState متاح`);
-      return;
-    }
-
-    // بناء Cookie header من AppState
-    const cookieStr = this._cookieHeader(state);
-
-    if (!cookieStr) {
-      console.warn(`[EXTENDER:${label}] ⚠️ keep-alive: الكوكيز فارغة`);
+    if (!funcs?.get || !ctx?.jar) {
+      console.warn(`[EXTENDER:${label}] ⚠️ keep-alive: FCA request context غير متاح`);
       return;
     }
 
     try {
-      // تأخير عشوائي (2–5 ثوانٍ) لمحاكاة نشاط بشري طبيعي
-      await _sleep(2_000 + Math.random() * 3_000);
-
-      const status = await this._fbPing(KEEPALIVE_ENDPOINT, cookieStr);
-
-      if (status < 200 || status >= 300) {
+      const response = await funcs.get(KEEPALIVE_ENDPOINT, ctx.jar, null, ctx.globalOptions || {});
+      const status = Number(response?.status || 0);
+      if (status >= 400) {
         console.warn(`[EXTENDER:${label}] ⚠️ keep-alive HTTP ${status}`);
-        // لا نُوقف — HTTP 3xx طبيعي على Facebook
-      }
-
-      // تمديد تواريخ انتهاء الكوكيز محلياً بعد كل ping ناجح
-      const freshState = this._api?.getAppState?.();
-      if (freshState?.length) {
-        const extended = extendCookieExpiry(freshState, 60);
-        persistAppState(extended, "keep-alive");
+        return;
       }
 
       this._keepAlives++;
       this._lastKeepAlive = new Date().toISOString();
-
-      console.log(
-        `[EXTENDER:${label}] 💓 keep-alive #${this._keepAlives}` +
-        ` — HTTP ${status}` +
-        (manual ? " (يدوي)" : "")
-      );
-
+      console.log(`[EXTENDER:${label}] 💓 keep-alive #${this._keepAlives} — HTTP ${status || "OK"}${manual ? " (يدوي)" : ""}`);
       await this._saveCurrentAppState("keep-alive");
       this._sessionGuard?.heartbeat();
-
     } catch (e) {
-      // خطأ شبكة مؤقت — لا يُوقف البوت
-      console.warn(`[EXTENDER:${label}] ⚠️ keep-alive axios فشل: ${e.message}`);
+      console.warn(`[EXTENDER:${label}] ⚠️ keep-alive request failed: ${e.message}`);
     }
   }
 
@@ -327,28 +274,32 @@ export class SessionExtender extends EventEmitter {
 
     console.log(`[EXTENDER:${label}] 🔄 تجديد [${urgency}] ${when}${manual ? " — يدوي" : ""}...`);
 
+    const before = this._api?.getAppState?.() || [];
+    const beforeSig = before.map((c) => `${c?.key ?? c?.name}=${c?.value}`).join("|");
+
     if (this._cookieRefresher) {
       await this._cookieRefresher.refresh();
     } else {
-      // [FIX-4] warmup عبر Axios لا عبر _defaultFuncs
       await this._fetchWarmup(isCritical);
     }
 
     const freshState = this._api?.getAppState?.();
     if (freshState?.length) {
-      const extended = extendCookieExpiry(freshState, 90);
-      persistAppState(extended, "post-refresh");
+      const afterSig = freshState.map((c) => `${c?.key ?? c?.name}=${c?.value}`).join("|");
+      const changed = beforeSig !== afterSig;
+      persistAppState(freshState, changed ? "session-refresh" : "session-check");
+      await this._saveCurrentAppState(changed ? "session-refresh" : "session-check");
+      if (changed) {
+        this._extensions++;
+        this._lastExtension = new Date().toISOString();
+        this.emit("extended", { count: this._extensions, manual, critical: isCritical });
+        this._onExtended?.({ count: this._extensions, manual, critical: isCritical });
+        console.log(`[EXTENDER:${label}] ✅ تحديث AppState #${this._extensions}`);
+      } else {
+        console.log(`[EXTENDER:${label}] ℹ️ الجلسة صالحة — لم تتغير الكوكيز`);
+      }
     }
-
-    this._extensions++;
-    this._lastExtension  = new Date().toISOString();
     this._sessionHealthy = true;
-
-    console.log(`[EXTENDER:${label}] ✅ تجديد #${this._extensions} — الجلسة مُمدَّدة`);
-    this.emit("extended", { count: this._extensions, manual, critical: isCritical });
-    this._onExtended?.({ count: this._extensions, manual, critical: isCritical });
-
-    await this._saveCurrentAppState("session-refresh");
   }
 
   async _refreshFbDtsg() {
@@ -365,22 +316,22 @@ export class SessionExtender extends EventEmitter {
    */
   async _fetchWarmup(aggressive = false) {
     const label = this._label;
-    let state;
-    try { state = this._api?.getAppState?.(); } catch (_) {}
-    if (!state?.length) return;
-
-    const cookieStr = this._cookieHeader(state);
+    const funcs = this._api?.__defaultFuncs;
+    const ctx = this._api?.__ctx;
+    if (!funcs?.get || !ctx?.jar) return;
 
     const urls = aggressive
-      ? [KEEPALIVE_ENDPOINT, "https://www.facebook.com/", KEEPALIVE_ENDPOINT]
+      ? [KEEPALIVE_ENDPOINT, "https://www.facebook.com/home.php"]
       : [KEEPALIVE_ENDPOINT];
 
-    for (const url of urls) {
+    for (let i = 0; i < urls.length; i++) {
       try {
-        await _sleep(1_500 + Math.random() * 2_000);
-        await this._fbPing(url, cookieStr);
+        if (i) await _sleep(1_500 + Math.random() * 2_000);
+        const response = await funcs.get(urls[i], ctx.jar, null, ctx.globalOptions || {});
+        const status = Number(response?.status || 0);
+        if (status >= 400) console.warn(`[EXTENDER:${label}] ⚠️ warmup HTTP ${status} [${urls[i]}]`);
       } catch (e) {
-        console.warn(`[EXTENDER:${label}] ⚠️ warmup axios [${url}]: ${e.message}`);
+        console.warn(`[EXTENDER:${label}] ⚠️ warmup [${urls[i]}]: ${e.message}`);
       }
     }
   }

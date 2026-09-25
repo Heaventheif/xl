@@ -12,7 +12,7 @@ const { getFrom } = require("../src/utils/constants");
 const { loadConfig } = require("./config");
 
 const { config } = loadConfig();
-const axiosBase = require("axios");
+const { generateTOTP, normalizeSecret } = require("./totp");
 const regions = [
   { code: "PRN", name: "Pacific Northwest Region", location: "Khu vực Tây Bắc Thái Bình Dương" },
   { code: "VLL", name: "Valley Region", location: "Valley" },
@@ -51,177 +51,108 @@ function mask(s, keep = 3) {
 }
 
 /**
- * Login via external API endpoint (iOS method)
- * @param {string} email - Email hoặc số điện thoại
- * @param {string} password - Mật khẩu
- * @param {string|null} twoFactor - Secret Base32 cho 2FA (không phải mã 6 số)
- * @param {string|null} apiBaseUrl - Base URL của API server (không có mặc định — phải chỉ định rõ ràng)
- * @param {string|null} apiKey - API key để xác thực (x-api-key header)
- * @returns {Promise<{ok: boolean, uid?: string, access_token?: string, cookies?: Array, cookie?: string, message?: string}>}
+ * Local Facebook web login. Credentials never leave this process for a
+ * third-party login service. If a TOTP secret is configured, the code is
+ * generated locally and submitted only to Facebook's own checkpoint form.
  */
-async function loginViaAPI(email, password, twoFactor = null, apiBaseUrl = null, apiKey = null) {
+async function loginViaFacebookWeb(email, password, twoFactor = null, globalOptions = {}) {
+  const jar = new CookieJar();
+  const opts = globalOptions || {};
+  const secret = normalizeSecret(twoFactor);
+  const started = Date.now();
+
+  if (!email || !password) return { ok: false, message: "Please provide email and password" };
+
   try {
-    // SECURITY: do not default to a hard-coded third-party domain. Sending
-    // a plaintext Facebook email/password to an external server should
-    // require the operator to explicitly opt in (via config.apiServer or
-    // the apiBaseUrl argument) rather than happening silently the first
-    // time someone logs in with email+password. If no server is configured,
-    // fail loudly instead of guessing where to send credentials.
-    const baseUrl = apiBaseUrl || config.apiServer || null;
-    if (!baseUrl) {
-      const msg = "loginViaAPI: no apiServer configured. Refusing to send credentials to a default third-party endpoint. Set config.apiServer (or pass apiBaseUrl) explicitly, or log in with an appstate/cookie instead of email+password.";
-      logger(chalk.italic(`⚠️ API-LOGIN: ${msg}`), "error");
-      return { ok: false, message: msg };
-    }
-    logger(chalk.italic(`⚠️ API-LOGIN: sending credentials for ${mask(email, 2)} to external server ${baseUrl} — only do this if you trust that server.`), "warn");
-    const endpoint = `${baseUrl}/api/v1/facebook/login_ios`;
-    const xApiKey = apiKey || config.apiKey || null;
+    const landing = await get("https://www.facebook.com/", jar, null, opts);
+    const html = String(landing?.data || landing?.body || "");
+    const $ = require("cheerio").load(html);
+    const loginForm = $("form").filter((_, el) => {
+      const action = String($(el).attr("action") || "");
+      return /login/i.test(action) || $(el).find('input[name="email"]').length || $(el).find('input[name="pass"]').length;
+    }).first();
 
-    // Build request body
-    const body = {
-      email,
-      password
-    };
+    if (!loginForm.length) throw new Error("Facebook login form not found");
 
-    // Only include twoFactor if provided (must be Base32 secret, not 6-digit code)
-    if (twoFactor && typeof twoFactor === "string" && twoFactor.trim()) {
-      // Clean up the secret - remove spaces and convert to uppercase
-      body.twoFactor = twoFactor.replace(/\s+/g, "").toUpperCase();
-    }
-
-    // Build headers
-    const headers = {
-      "Content-Type": "application/json",
-      "Accept": "application/json"
-    };
-
-    // Add x-api-key header if provided
-    if (xApiKey) {
-      headers["x-api-key"] = xApiKey;
-    }
-
-    logger(chalk.italic(`🔐 API-LOGIN: Attempting login for ${mask(email, 2)} via iOS API`), "info");
-
-    const response = await axiosBase({
-      method: "POST",
-      url: endpoint,
-      headers,
-      data: body,
-      timeout: 60000,
-      validateStatus: () => true
+    const form = {};
+    loginForm.find("input[name]").each((_, el) => {
+      const name = $(el).attr("name");
+      if (name) form[name] = $(el).attr("value") || "";
     });
-    if (response.status === 200 && response.data) {
-      const data = response.data;
+    form.email = email;
+    form.pass = password;
 
-      // Check if login was successful
-      if (data.error) {
-        logger(chalk.italic(`❌ API-LOGIN: Login failed - ${data.error}`), "error");
-        return { ok: false, message: data.error };
+    let action = loginForm.attr("action") || "/login/device-based/regular/login/?login_attempt=1&lwv=110";
+    try { action = new URL(action, "https://www.facebook.com/").toString(); } catch { action = "https://www.facebook.com/login/device-based/regular/login/?login_attempt=1&lwv=110"; }
+
+    logger(chalk.italic(`🔐 Local Facebook login: ${mask(email, 2)}`), "info");
+    let response = await post(action, jar, form, opts);
+    response = response || {};
+
+    let body = String(response.data || response.body || "");
+    let responseUrl = response?.request?.res?.responseUrl || response?.request?.responseURL || "";
+    let checkpointUrl = /checkpoint\//i.test(responseUrl) ? responseUrl : (/checkpoint\//i.test(body) ? responseUrl : "");
+
+    const hasUserCookie = async () => {
+      try {
+        const cookies = await jar.getCookies("https://www.facebook.com");
+        return cookies.some(c => (c.key === "c_user" || c.key === "i_user") && c.value);
+      } catch { return false; }
+    };
+
+    if (!await hasUserCookie() && (checkpointUrl || /login-approval|approvals_code|checkpoint/i.test(body))) {
+      if (!checkpointUrl) checkpointUrl = "https://www.facebook.com/checkpoint/?next=https%3A%2F%2Fwww.facebook.com%2Fhome.php";
+      const checkpoint = await get(checkpointUrl, jar, null, opts);
+      body = String(checkpoint?.data || checkpoint?.body || "");
+      const cpUrl = checkpoint?.request?.res?.responseUrl || checkpointUrl;
+      const cp$ = require("cheerio").load(body);
+      const cpForm = cp$("form").first();
+      const approvalForm = {};
+      cpForm.find("input[name]").each((_, el) => {
+        const name = cp$(el).attr("name");
+        if (name) approvalForm[name] = cp$(el).attr("value") || "";
+      });
+
+      if (!secret) {
+        const err = new Error("Facebook requires 2FA approval; set FACEBOOK_2FA/FB_2FA to the Base32 TOTP secret");
+        err.error = "login-approval";
+        throw err;
       }
 
-      // Extract response data
-      const uid = data.uid || data.user_id || data.userId || null;
-      const accessToken = data.access_token || data.accessToken || null;
-      const cookie = data.cookie || data.cookies || null;
+      const code = await generateTOTP(secret);
+      approvalForm.approvals_code = code;
+      approvalForm["submit[Continue]"] = cp$("#checkpointSubmitButton").text().trim() || "Continue";
 
-      if (!uid && !accessToken && !cookie) {
-        logger("API-LOGIN: Response missing required fields (uid, access_token, cookie)", "warn");
-        return { ok: false, message: "Invalid response from API" };
+      const approvalResponse = await post(cpUrl, jar, approvalForm, opts);
+      const approvalBody = String(approvalResponse?.data || approvalResponse?.body || "");
+      if (/invalid|incorrect|wrong/i.test(approvalBody) && /approvals_code/i.test(approvalBody)) {
+        throw new Error("Facebook rejected the generated TOTP code");
       }
 
-      logger(chalk.italic(`✅ API-LOGIN: Login successful for UID: ${uid || "unknown"}`), "info");
-
-      // Parse cookies if provided as string
-      let cookies = [];
-      if (typeof cookie === "string") {
-        // Parse cookie string format: "key1=value1; key2=value2"
-        const pairs = cookie.split(";").map(p => p.trim()).filter(Boolean);
-        for (const pair of pairs) {
-          const eq = pair.indexOf("=");
-          if (eq > 0) {
-            const key = pair.slice(0, eq).trim();
-            const value = pair.slice(eq + 1).trim();
-            cookies.push({
-              key,
-              value,
-              domain: ".facebook.com",
-              path: "/"
-            });
-          }
-        }
-      } else if (Array.isArray(cookie)) {
-        // Already in array format
-        cookies = cookie.map(c => ({
-          key: c.key || c.name,
-          value: c.value,
-          domain: c.domain || ".facebook.com",
-          path: c.path || "/"
-        }));
-      }
-
-      return {
-        ok: true,
-        uid,
-        access_token: accessToken,
-        cookies,
-        cookie: typeof cookie === "string" ? cookie : null
-      };
+      delete approvalForm.approvals_code;
+      delete approvalForm.no_fido;
+      approvalForm.name_action_selected = "dont_save";
+      await post(cpUrl, jar, approvalForm, opts);
+      await get("https://www.facebook.com/", jar, null, opts);
     }
 
-    // Handle error responses
-    const errorMsg = response.data && response.data.error
-      ? response.data.error
-      : response.data && response.data.message
-        ? response.data.message
-        : `HTTP ${response.status}`;
+    if (!await hasUserCookie()) {
+      throw new Error("Facebook login did not establish c_user/i_user cookie; credentials may be rejected or Facebook may require an unsupported verification step");
+    }
 
-    logger(chalk.italic(`❌ API-LOGIN: Login failed - ${errorMsg}`), "error");
-    return { ok: false, message: errorMsg };
-
+    const cookies = await getAppState(jar);
+    logger(chalk.italic(`✅ Local Facebook login successful (${Date.now() - started}ms)`), "info");
+    return { ok: true, cookies, uid: cookies.find(c => c.key === "c_user" || c.key === "i_user")?.value || null };
   } catch (error) {
-    const errMsg = error && error.message ? error.message : String(error);
-    logger(chalk.italic(`⚠️ API-LOGIN: Request failed - ${errMsg}`), "error");
-    return { ok: false, message: errMsg };
+    const msg = error?.message || String(error);
+    logger(chalk.italic(`❌ Local Facebook login failed: ${msg}`), "error");
+    return { ok: false, message: msg, error: error?.error };
   }
 }
 
-/**
- * High-level login function that uses the API endpoint
- * @param {string} email - Email hoặc số điện thoại  
- * @param {string} password - Mật khẩu
- * @param {string|null} twoFactor - Secret Base32 cho 2FA (không phải mã 6 số)
- * @param {string|null} apiBaseUrl - Base URL của API server
- * @returns {Promise<{status: boolean, cookies?: Array, uid?: string, access_token?: string, message?: string}>}
- */
-async function tokensViaAPI(email, password, twoFactor = null, apiBaseUrl = null) {
-  const t0 = process.hrtime.bigint();
-
-  if (!email || !password) {
-    return { status: false, message: "Please provide email and password" };
-  }
-
-  logger(chalk.italic(`🔑 API-LOGIN: Initialize login ${mask(email, 2)}`), "info");
-
-  const res = await loginViaAPI(email, password, twoFactor, apiBaseUrl);
-
-  if (res && res.ok) {
-    logger(chalk.italic(`✅ API-LOGIN: Login success - UID: ${res.uid}`), "info");
-    const t1 = Number(process.hrtime.bigint() - t0) / 1e6;
-    logger(chalk.italic(`⏱️ Done API login ${Math.round(t1)}ms`), "info");
-
-    return {
-      status: true,
-      cookies: res.cookies,
-      uid: res.uid,
-      access_token: res.access_token,
-      cookie: res.cookie
-    };
-  }
-
-  return {
-    status: false,
-    message: res && res.message ? res.message : "Login failed"
-  };
+async function tokensViaAPI(email, password, twoFactor = null, globalOptions = {}) {
+  const res = await loginViaFacebookWeb(email, password, twoFactor, globalOptions);
+  return res.ok ? { status: true, cookies: res.cookies, uid: res.uid } : { status: false, message: res.message };
 }
 
 function normalizeCookieHeaderString(s) {
@@ -242,35 +173,63 @@ function normalizeCookieHeaderString(s) {
   return out;
 }
 
-function setJarFromPairs(j, pairs, domain) {
-  const expires = new Date(Date.now() + 31536e6).toUTCString();
-  // URLs to set cookies for - include both desktop and mobile versions
+function setJarFromPairs(j, pairs, domain = ".facebook.com") {
   const urls = [
     "https://www.facebook.com",
-    "https://facebook.com",
-    "https://m.facebook.com",
-    "http://www.facebook.com",
-    "http://facebook.com",
-    "http://m.facebook.com"
+    "https://m.facebook.com"
   ];
-  
-  for (const kv of pairs) {
-    const cookieStr = `${kv}; expires=${expires}; domain=${domain}; path=/;`;
-    // Set cookie for all URLs to ensure it works on both desktop and mobile
+  for (const kv of pairs || []) {
+    if (!kv || !String(kv).includes("=")) continue;
+    const cookieStr = `${kv}; Domain=${domain}; Path=/; Secure`;
     for (const url of urls) {
       try {
-        if (typeof j.setCookieSync === "function") {
-          j.setCookieSync(cookieStr, url);
-        } else if (typeof j.setCookie === "function") {
-          j.setCookie(cookieStr, url);
-        }
-      } catch (err) {
-        // Silently ignore domain mismatch errors
-        // These can happen when setting cookies across different subdomains
-      }
+        if (typeof j.setCookieSync === "function") j.setCookieSync(cookieStr, url);
+        else if (typeof j.setCookie === "function") awaitMaybeSetCookie(j, cookieStr, url);
+      } catch (_) {}
     }
   }
 }
+
+function awaitMaybeSetCookie(j, cookieStr, url) {
+  try {
+    const result = j.setCookie(cookieStr, url);
+    if (result && typeof result.catch === "function") result.catch(() => {});
+  } catch (_) {}
+}
+
+function setJarFromAppState(j, cookies) {
+  if (!Array.isArray(cookies)) return 0;
+  let count = 0;
+  for (const c of cookies) {
+    const key = String(c?.key ?? c?.name ?? "").trim();
+    const value = String(c?.value ?? "");
+    if (!key || !value) continue;
+    const domain = c?.domain || ".facebook.com";
+    const cookiePath = c?.path || "/";
+    const attrs = [`Domain=${domain}`, `Path=${cookiePath}`];
+    if (c?.secure !== false) attrs.push("Secure");
+    if (c?.httpOnly) attrs.push("HttpOnly");
+    if (c?.sameSite) attrs.push(`SameSite=${String(c.sameSite)}`);
+
+    const exp = c?.expirationDate ?? c?.expires;
+    if (exp && exp !== "Infinity" && exp !== Infinity) {
+      let ms = NaN;
+      if (exp instanceof Date) ms = exp.getTime();
+      else if (typeof exp === "number") ms = exp < 1e12 ? exp * 1000 : exp;
+      else if (typeof exp === "string") ms = new Date(exp).getTime();
+      if (Number.isFinite(ms) && ms > 0) attrs.push(`Expires=${new Date(ms).toUTCString()}`);
+    }
+
+    const cookieStr = `${key}=${value}; ${attrs.join("; ")}`;
+    try {
+      if (typeof j.setCookieSync === "function") j.setCookieSync(cookieStr, `https://www.facebook.com${cookiePath}`);
+      else if (typeof j.setCookie === "function") j.setCookie(cookieStr, `https://www.facebook.com${cookiePath}`);
+      count++;
+    } catch (_) {}
+  }
+  return count;
+}
+
 
 function cookieHeaderFromJar(j) {
   const urls = ["https://www.facebook.com"];
@@ -293,104 +252,11 @@ function cookieHeaderFromJar(j) {
   return parts.join("; ");
 }
 
-let uniqueIndexEnsured = false;
-
-function getBackupModel() {
-  try {
-    if (!models || !models.sequelize || !models.Sequelize) return null;
-    const sequelize = models.sequelize;
-
-    // Validate that sequelize is a proper Sequelize instance
-    if (!sequelize || typeof sequelize.define !== "function") return null;
-
-    const { DataTypes } = models.Sequelize;
-    if (sequelize.models && sequelize.models.AppStateBackup) return sequelize.models.AppStateBackup;
-    const dialect = typeof sequelize.getDialect === "function" ? sequelize.getDialect() : "sqlite";
-    const LongText = (dialect === "mysql" || dialect === "mariadb") ? DataTypes.TEXT("long") : DataTypes.TEXT;
-
-    try {
-      const AppStateBackup = sequelize.define(
-        "AppStateBackup",
-        {
-          id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
-          userID: { type: DataTypes.STRING, allowNull: false },
-          type: { type: DataTypes.STRING, allowNull: false },
-          data: { type: LongText }
-        },
-        { tableName: "app_state_backups", timestamps: true, indexes: [{ unique: true, fields: ["userID", "type"] }] }
-      );
-      return AppStateBackup;
-    } catch (defineError) {
-      // If define fails, log and return null
-      logger(`Failed to define AppStateBackup model: ${defineError && defineError.message ? defineError.message : String(defineError)}`, "warn");
-      return null;
-    }
-  } catch (e) {
-    // Silently handle any errors in getBackupModel
-    return null;
-  }
-}
-
-async function ensureUniqueIndex(sequelize) {
-  if (uniqueIndexEnsured || !sequelize) return;
-  try {
-    if (typeof sequelize.getQueryInterface !== "function") return;
-    await sequelize.getQueryInterface().addIndex("app_state_backups", ["userID", "type"], { unique: true, name: "app_state_user_type_unique" });
-  } catch { }
-  uniqueIndexEnsured = true;
-}
-
-async function upsertBackup(Model, userID, type, data) {
-  const where = { userID: String(userID || ""), type };
-  const row = await Model.findOne({ where });
-  if (row) {
-    await row.update({ data });
-    logger(`Overwrote existing ${type} backup for user ${where.userID}`, "info");
-    return;
-  }
-  await Model.create({ ...where, data });
-  logger(`Created new ${type} backup for user ${where.userID}`, "info");
-}
-
-async function backupAppStateSQL(j, userID) {
-  try {
-    const Model = getBackupModel();
-    if (!Model) return;
-    if (!models || !models.sequelize) return;
-    await Model.sync();
-    await ensureUniqueIndex(models.sequelize);
-    const appJson = getAppState(j);
-    const ck = cookieHeaderFromJar(j);
-    await upsertBackup(Model, userID, "appstate", JSON.stringify(appJson));
-    await upsertBackup(Model, userID, "cookie", ck);
-    logger("Backup stored (overwrite mode)", "info");
-  } catch (e) {
-    logger(`Failed to save appstate backup ${e && e.message ? e.message : String(e)}`, "warn");
-  }
-}
-
-async function getLatestBackup(userID, type) {
-  try {
-    const Model = getBackupModel();
-    if (!Model) return null;
-    const row = await Model.findOne({ where: { userID: String(userID || ""), type } });
-    return row ? row.data : null;
-  } catch {
-    return null;
-  }
-}
-
-async function getLatestBackupAny(type) {
-  try {
-    const Model = getBackupModel();
-    if (!Model) return null;
-    const row = await Model.findOne({ where: { type }, order: [["updatedAt", "DESC"]] });
-    return row ? row.data : null;
-  } catch {
-    return null;
-  }
-}
-
+// Legacy SQL-backup hooks are intentionally no-ops.
+// SunkenBot persists AppState through its encrypted file/MongoDB layer instead.
+async function backupAppStateSQL() { return false; }
+async function getLatestBackup() { return null; }
+async function getLatestBackupAny() { return null; }
 
 
 async function setJarCookies(j, appstate) {
@@ -479,47 +345,20 @@ async function setJarCookies(j, appstate) {
   await Promise.all(tasks);
 }
 
-// tokens function - alias to tokensViaAPI for backward compatibility
-async function tokens(username, password, twofactor = null) {
-  return tokensViaAPI(username, password, twofactor);
+async function tokens(username, password, twofactor = null, globalOptions = {}) {
+  return tokensViaAPI(username, password, twofactor, globalOptions);
 }
 
-async function hydrateJarFromDB(userID, jar) {
-  try {
-    let ck = null;
-    let app = null;
-    if (userID) {
-      ck = await getLatestBackup(userID, "cookie");
-      app = await getLatestBackup(userID, "appstate");
-    } else {
-      ck = await getLatestBackupAny("cookie");
-      app = await getLatestBackupAny("appstate");
-    }
-    if (ck) {
-      const pairs = normalizeCookieHeaderString(ck);
-      if (pairs.length) {
-        setJarFromPairs(jar, pairs, ".facebook.com");
-        return true;
-      }
-    }
-    if (app) {
-      let parsed = null;
-      try {
-        parsed = JSON.parse(app);
-      } catch { }
-      if (Array.isArray(parsed)) {
-        const pairs = parsed.map(c => [c.name || c.key, c.value].join("="));
-        setJarFromPairs(jar, pairs, ".facebook.com");
-        return true;
-      }
-    }
-    return false;
-  } catch {
-    return false;
-  }
+async function tokensWithOptions(username, password, twofactor = null, globalOptions = {}) {
+  return tokens(username, password, twofactor, globalOptions);
 }
 
-async function tryAutoLoginIfNeeded(currentHtml, currentCookies, globalOptions, ctxRef, hadAppStateInput = false, jar) {
+async function hydrateJarFromDB() {
+  return false;
+}
+
+
+async function tryAutoLoginIfNeeded(currentHtml, currentCookies, globalOptions, ctxRef, hadAppStateInput = false, jar, twofactor = null) {
   // Helper to validate UID - must be a non-zero positive number string
   const isValidUID = uid => uid && uid !== "0" && /^\d+$/.test(uid) && parseInt(uid, 10) > 0;
 
@@ -575,7 +414,7 @@ async function tryAutoLoginIfNeeded(currentHtml, currentCookies, globalOptions, 
           logger(`tryAutoLoginIfNeeded: DB backup session valid, USER_ID=${htmlUserID}`, "info");
           return { html: htmlB, cookies: cookiesB, userID: htmlUserID };
         } else {
-          logger(`tryAutoLoginIfNeeded: DB backup session dead (HTML USER_ID=${htmlUserID || "empty"}), will try API login...`, "warn");
+          logger(`tryAutoLoginIfNeeded: DB backup session dead (HTML USER_ID=${htmlUserID || "empty"}), will try local credential login...`, "warn");
         }
       }
     } catch (dbErr) {
@@ -588,24 +427,24 @@ async function tryAutoLoginIfNeeded(currentHtml, currentCookies, globalOptions, 
     throw new Error("AppState expired — Auto-login is disabled");
   }
 
-  // Try API login
+  // Try local credential login
   const u = config.credentials?.email || config.email;
   const p = config.credentials?.password || config.password;
-  const tf = config.credentials?.twofactor || config.twofactor || null;
+  const tf = twofactor || config.credentials?.twofactor || config.twofactor || null;
 
   if (!u || !p) {
     logger("tryAutoLoginIfNeeded: No credentials configured for auto-login!", "error");
     throw new Error("Missing credentials for auto-login (email/password not configured in fca-config.json)");
   }
 
-  logger(`tryAutoLoginIfNeeded: Attempting API login for ${u.slice(0, 3)}***...`, "info");
+  logger(`tryAutoLoginIfNeeded: Attempting local credential login for ${u.slice(0, 3)}***...`, "info");
 
-  const r = await tokens(u, p, tf);
+  const r = await tokensWithOptions(u, p, tf, globalOptions);
   if (!r || !r.status) {
-    throw new Error(r && r.message ? r.message : "API Login failed");
+    throw new Error(r && r.message ? r.message : "credential login failed");
   }
 
-  logger(`tryAutoLoginIfNeeded: API login successful! UID: ${r.uid}`, "info");
+  logger(`tryAutoLoginIfNeeded: Local credential login successful! UID: ${r.uid}`, "info");
 
   // Handle cookies - can be array, cookie string header, or both
   let cookiePairs = [];
@@ -642,11 +481,15 @@ async function tryAutoLoginIfNeeded(currentHtml, currentCookies, globalOptions, 
   }
 
   if (cookiePairs.length === 0) {
-    logger("tryAutoLoginIfNeeded: No cookies found in API response", "warn");
+    logger("tryAutoLoginIfNeeded: No cookies found in login response", "warn");
     throw new Error("API login returned no cookies");
   } else {
-    logger(`tryAutoLoginIfNeeded: Parsed ${cookiePairs.length} cookies from API response`, "info");
-    setJarFromPairs(jar, cookiePairs, ".facebook.com");
+    logger(`tryAutoLoginIfNeeded: Parsed ${cookiePairs.length} cookies from login response`, "info");
+    if (Array.isArray(r.cookies)) {
+      setJarFromAppState(jar, r.cookies);
+    } else {
+      setJarFromPairs(jar, cookiePairs, ".facebook.com");
+    }
   }
 
   // Wait a bit for cookies to be set
@@ -718,7 +561,7 @@ async function tryAutoLoginIfNeeded(currentHtml, currentCookies, globalOptions, 
     logger(`tryAutoLoginIfNeeded: Using USER_ID from cookies: ${finalUID}`, "info");
   } else if (isValidUID(r.uid)) {
     finalUID = r.uid;
-    logger(`tryAutoLoginIfNeeded: Using USER_ID from API response: ${finalUID}`, "info");
+    logger(`tryAutoLoginIfNeeded: Using USER_ID from login response: ${finalUID}`, "info");
   }
 
   if (!isValidUID(finalUID)) {
@@ -734,16 +577,15 @@ async function tryAutoLoginIfNeeded(currentHtml, currentCookies, globalOptions, 
   return { html: html2, cookies: cookies2, userID: finalUID };
 }
 
-function makeLogin(j, email, password, globalOptions) {
+function makeLogin(j, email, password, globalOptions, twofactor = null) {
   return async function () {
     const u = email || config.credentials?.email;
     const p = password || config.credentials?.password;
-    const tf = config.credentials?.twofactor || null;
+    const tf = twofactor || config.credentials?.twofactor || config.twofactor || null;
     if (!u || !p) return;
-    const r = await tokens(u, p, tf);
+    const r = await tokensWithOptions(u, p, tf, globalOptions);
     if (r && r.status && Array.isArray(r.cookies)) {
-      const pairs = r.cookies.map(c => `${c.key || c.name}=${c.value}`);
-      setJarFromPairs(j, pairs, ".facebook.com");
+      setJarFromAppState(j, r.cookies);
       await get("https://www.facebook.com/", j, null, globalOptions).then(saveCookies(j));
     } else {
       throw new Error(r && r.message ? r.message : "Login failed");
@@ -751,7 +593,7 @@ function makeLogin(j, email, password, globalOptions) {
   };
 }
 
-function loginHelper(appState, Cookie, email, password, globalOptions, callback) {
+function loginHelper(appState, Cookie, email, password, globalOptions, callback, prCallback, twofactor = null) {
   try {
     // Each call to loginHelper() (i.e. each login()/account) gets its own,
     // isolated CookieJar instead of sharing one process-wide singleton.
@@ -817,7 +659,6 @@ function loginHelper(appState, Cookie, email, password, globalOptions, callback)
                     value: value.trim(),
                     domain: ".facebook.com",
                     path: "/",
-                    expires: new Date().getTime() + 1000 * 60 * 60 * 24 * 365
                   });
                 }
               });
@@ -907,7 +748,7 @@ function loginHelper(appState, Cookie, email, password, globalOptions, callback)
       logger(chalk.italic("😐 AppState expired — logging in with credentials..."), "warn");
       return get("https://www.facebook.com/", null, null, globalOptions)
         .then(saveCookies(jar))
-        .then(makeLogin(jar, email, password, globalOptions))
+        .then(makeLogin(jar, email, password, globalOptions, twofactor))
         .then(function () {
           return get("https://www.facebook.com/", jar, null, globalOptions).then(saveCookies(jar));
         });
@@ -981,7 +822,7 @@ function loginHelper(appState, Cookie, email, password, globalOptions, callback)
         if (!isValidUID(userID)) {
           logger("Invalid userID detected (missing or 0), attempting auto-login...", "warn");
           // Pass hadAppStateInput=true if appState/Cookie was originally provided
-          const retried = await tryAutoLoginIfNeeded(html, cookies, globalOptions, ctx, !!(appState || Cookie), jar);
+          const retried = await tryAutoLoginIfNeeded(html, cookies, globalOptions, ctx, !!(appState || Cookie), jar, twofactor);
           html = retried.html;
           cookies = retried.cookies;
           userID = retried.userID;
@@ -1100,7 +941,7 @@ function loginHelper(appState, Cookie, email, password, globalOptions, callback)
             if (!isValidUID(info.USER_ID)) {
               logger("Facebook response shows invalid USER_ID (0 or empty), session is dead!", "warn");
               // Force trigger auto-login
-              const retried = await tryAutoLoginIfNeeded(html, cookies, globalOptions, ctx, !!(appState || Cookie), jar);
+              const retried = await tryAutoLoginIfNeeded(html, cookies, globalOptions, ctx, !!(appState || Cookie), jar, twofactor);
               html = retried.html;
               cookies = retried.cookies;
               userID = retried.userID;
@@ -1124,25 +965,7 @@ function loginHelper(appState, Cookie, email, password, globalOptions, callback)
         try {
           if (userID) await backupAppStateSQL(jar, userID);
         } catch { }
-        Promise.resolve()
-          .then(function () {
-            if (models && models.sequelize && typeof models.sequelize.authenticate === "function") {
-              return models.sequelize.authenticate();
-            }
-          })
-          .then(function () {
-            if (models && typeof models.syncAll === "function") {
-              return models.syncAll();
-            }
-          })
-          .catch(function (error) {
-            // Silently handle database errors - they're not critical for login
-            const errorMsg = error && error.message ? error.message : String(error);
-            if (!errorMsg.includes("No Sequelize instance passed")) {
-              // Only log non-Sequelize instance errors
-              logger(`Database connection failed: ${errorMsg}`, "warn");
-            }
-          });
+
 
         const emitter = new EventEmitter();
         const ctxMain = {
@@ -1208,12 +1031,11 @@ function loginHelper(appState, Cookie, email, password, globalOptions, callback)
 
             const u = config.credentials?.email || email;
             const p = config.credentials?.password || password;
-            const tf = config.credentials?.twofactor || null;
+            const tf = twofactor || config.credentials?.twofactor || config.twofactor || null;
             if (!u || !p) return false;
-            const r = await tokens(u, p, tf);
+            const r = await tokensWithOptions(u, p, tf, globalOptions);
             if (!(r && r.status && Array.isArray(r.cookies))) return false;
-            const pairs = r.cookies.map(c => `${c.key || c.name}=${c.value}`);
-            setJarFromPairs(jar, pairs, ".facebook.com");
+            setJarFromAppState(jar, r.cookies);
             await get("https://www.facebook.com/", jar, null, globalOptions).then(saveCookies(jar));
             return true;
           } catch {
@@ -1228,19 +1050,16 @@ function loginHelper(appState, Cookie, email, password, globalOptions, callback)
           getAppState: function () {
             return getAppState(jar);
           },
-          getLatestAppStateFromDB: async function (uid = userID) {
-            const data = await getLatestBackup(uid, "appstate");
-            return data ? JSON.parse(data) : null;
-          },
-          getLatestCookieFromDB: async function (uid = userID) {
-            return await getLatestBackup(uid, "cookie");
-          },
+          getLatestAppStateFromDB: async function () { return null; },
+          getLatestCookieFromDB: async function () { return null; },
           on: emitter.on.bind(emitter),
           once: emitter.once.bind(emitter),
           off: emitter.removeListener.bind(emitter),
           removeAllListeners: emitter.removeAllListeners.bind(emitter)
         };
         const defaultFuncs = makeDefaults(html, userID, ctxMain);
+        api.__ctx = ctxMain;
+        api.__defaultFuncs = defaultFuncs;
 
         // Attach lightweight DB updaters for realtime events (MQTT)
         try {
@@ -1281,26 +1100,6 @@ function loginHelper(appState, Cookie, email, password, globalOptions, callback)
         }
 
         const srcRoot = path.join(__dirname, "../src/api");
-        // Load only the API surface used by Sunken Bot.
-        const apiLoadAllowlist = new Set([
-          "action:getCurrentUserID",
-          "action:handleFriendRequest",
-          "action:refreshFb_dtsg",
-          "messaging:addUserToGroup",
-          "messaging:changeAdminStatus",
-          "messaging:changeNickname",
-          "messaging:editMessage",
-          "messaging:handleMessageRequest",
-          "messaging:markAsRead",
-          "messaging:removeUserFromGroup",
-          "messaging:setTitle",
-          "messaging:sendTypingIndicator",
-          "messaging:unsendMessage",
-          "messaging:uploadAttachment",
-          "threads:getThreadInfo",
-          "threads:getThreadList",
-          "users:getUserInfo"
-        ]);
         let loaded = 0;
         let skipped = 0;
         fs.readdirSync(srcRoot, { withFileTypes: true }).forEach((sub) => {
@@ -1308,24 +1107,23 @@ function loginHelper(appState, Cookie, email, password, globalOptions, callback)
           const subDir = path.join(srcRoot, sub.name);
           fs.readdirSync(subDir, { withFileTypes: true }).forEach((entry) => {
             if (!entry.isFile() || !entry.name.endsWith(".js")) return;
+            const p = path.join(subDir, entry.name);
             const key = path.basename(entry.name, ".js");
-            if (!apiLoadAllowlist.has(`${sub.name}:${key}`)) return;
-            const modPath = path.join(subDir, entry.name);
             if (api[key]) {
               skipped++;
               return;
             }
             let mod;
             try {
-              mod = require(modPath);
+              mod = require(p);
             } catch (e) {
-              logger(`Failed to require API module ${modPath}: ${e && e.message ? e.message : String(e)}`, "warn");
+              logger(`Failed to require API module ${p}: ${e && e.message ? e.message : String(e)}`, "warn");
               skipped++;
               return;
             }
             const factory = typeof mod === "function" ? mod : (mod && typeof mod.default === "function" ? mod.default : null);
             if (!factory) {
-              logger(`API module ${modPath} does not export a function, skipping`, "warn");
+              logger(`API module ${p} does not export a function, skipping`, "warn");
               skipped++;
               return;
             }
@@ -1333,7 +1131,7 @@ function loginHelper(appState, Cookie, email, password, globalOptions, callback)
             loaded++;
           });
         });
-        logger(`Loaded ${loaded} FCA API methods${skipped ? `, skipped ${skipped}` : ""}`);
+        logger(`Loaded ${loaded} FCA API methods${skipped ? `, skipped ${skipped} duplicates` : ""}`);
         if (api.listenMqtt) {
           api._listenMqttRaw = api.listenMqtt;
           api.listen = api.listenMqtt;
@@ -1347,12 +1145,25 @@ function loginHelper(appState, Cookie, email, password, globalOptions, callback)
             });
           }, 86400000);
         }
+        try {
+          api.sessionGuard = require("../src/api/messaging/sessionGuard")(defaultFuncs, api, ctxMain);
+        } catch (e) {
+          logger(`sessionGuard init failed (non-fatal): ${e && e.message ? e.message : String(e)}`, "warn");
+        }
+
+        try {
+          api.sendBroadcast = require("../src/api/messaging/sendBroadcast")(defaultFuncs, api, ctxMain);
+        } catch (e) {
+          logger(`sendBroadcast init failed (non-fatal): ${e && e.message ? e.message : String(e)}`, "warn");
+        }
 
         // sendMessage override
         try {
           const fcanxSendMsg = require("../src/api/socket/sendMessage")(defaultFuncs, api, ctxMain);
           api.sendMessage = fcanxSendMsg;
+          api.sendMessageMqtt = require("../src/api/socket/sendMessageMqtt")(defaultFuncs, api, ctxMain);
           api.OldMessage = require("../src/api/socket/OldMessage")(defaultFuncs, api, ctxMain);
+          api.sendMessageDM = (msg, threadID, cb, replyTo) => api.OldMessage(msg, threadID, cb, replyTo, true);
         } catch (e) {
           logger(`sendMessage override failed (non-fatal): ${e && e.message ? e.message : String(e)}`, "warn");
         }
@@ -1378,7 +1189,8 @@ function loginHelper(appState, Cookie, email, password, globalOptions, callback)
 module.exports = loginHelper;
 module.exports.loginHelper = loginHelper;
 module.exports.tokensViaAPI = tokensViaAPI;
-module.exports.loginViaAPI = loginViaAPI;
+module.exports.loginViaAPI = loginViaFacebookWeb;
 module.exports.tokens = tokens;
 module.exports.normalizeCookieHeaderString = normalizeCookieHeaderString;
 module.exports.setJarFromPairs = setJarFromPairs;
+module.exports.setJarFromAppState = setJarFromAppState;

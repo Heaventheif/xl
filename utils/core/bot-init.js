@@ -158,7 +158,7 @@ export async function initBotLifecycle(api, botIndex, opts = {}) {
     try {
       const extender = _createSessionExtender({
         api, botIndex,
-        checkIntervalMs:    sessionCfg.healthCheckIntervalMs,
+        healthCheckIntervalMs: sessionCfg.healthCheckIntervalMs,
         keepAliveIntervalMs:sessionCfg.keepAliveIntervalMs,
         refreshThresholdMs: sessionCfg.refreshThresholdMs,
         criticalThresholdMs:sessionCfg.criticalThresholdMs,
@@ -166,9 +166,23 @@ export async function initBotLifecycle(api, botIndex, opts = {}) {
         onExtended: ({ count }) => {
           try {
             const s = api.getAppState?.();
-            if (s?.length) saveAppState(s, botIndex, "extended");
+            if (s?.length) saveAppState(s, botIndex, "updated");
           } catch (_) {}
-          console.log(`[EXTENDER:${label}] 📦 تمديد #${count}`);
+          console.log(`[EXTENDER:${label}] 📦 AppState updated #${count}`);
+        },
+        onCritical: async () => {
+          const recover = api?.__ctx?.performAutoLogin;
+          if (typeof recover !== "function") return false;
+          try {
+            const ok = await recover();
+            if (ok) {
+              const s = api.getAppState?.();
+              if (s?.length) saveAppState(s, botIndex, "credential-recovery");
+            }
+            return Boolean(ok);
+          } catch (_) {
+            return false;
+          }
         },
       });
       extender.start();

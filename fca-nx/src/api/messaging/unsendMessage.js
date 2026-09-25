@@ -37,7 +37,7 @@ module.exports = function (defaultFuncs, api, ctx) {
       };
       try {
         ctx.mqttClient.publish("/ls_req", JSON.stringify(content), {
-          qos: 1,
+          qos: 0,
           retain: false
         });
       } catch (err) {

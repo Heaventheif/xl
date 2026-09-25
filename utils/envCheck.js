@@ -17,8 +17,13 @@ function buildChecks(projectRoot) {
         level: "warn",
         key: null,
         label: "FB credentials",
-        test: () => Boolean(process.env.APPSTATE?.trim()),
-        message: "لا يوجد AppState صالح — أضف appstate1.json أو APPSTATE قبل التشغيل."
+        test: () => Boolean(
+            process.env.APPSTATE?.trim() ||
+            (process.env.FACEBOOK_EMAIL?.trim() && process.env.FACEBOOK_PASSWORD) ||
+            (process.env.APPSTATE_FILE && fs.existsSync(path.resolve(projectRoot, process.env.APPSTATE_FILE))) ||
+            hasAnyAppStateFile(projectRoot)
+        ),
+        message: "لا يوجد AppState أو email/password صالحان — ضع appstate.json أو متغيرات FACEBOOK_EMAIL/FACEBOOK_PASSWORD."
     }, {
         level: "warn",
         key: "HF_SPACE_URL",

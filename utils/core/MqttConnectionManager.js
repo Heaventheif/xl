@@ -1,16 +1,16 @@
 import { EventEmitter } from "node:events";
 
 const DEFAULTS = {
-  staleAfterMs: 8 * 60_000,
+  staleAfterMs: 20 * 60_000,
   initialGraceMs: 2 * 60_000,
-  watchdogIntervalMs: 30_000,
+  watchdogIntervalMs: 60_000,
   stableWindowMs: 5 * 60_000,
   reconnectBaseMs: 2_000,
   reconnectCapMs: 5 * 60_000,
   cooldownMs: 15 * 60_000,
   authBlockCooldownMs: 90 * 60_000,  // ← 90 دقيقة انتظار عند login_blocked
   maxFastAttempts: 10,
-  pingIntervalMs: 120_000,
+  pingIntervalMs: 300_000,
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -133,11 +133,14 @@ export class MqttConnectionManager extends EventEmitter {
 
     // If the raw client is not exposed by fca-nx, recent MQTT events still
     // prove that the listener is alive. Keep the public state accurate.
-    if (!this.stopped && this.state === "CONNECTING" && recentActivity) {
+    if (!this.stopped && socketConnected) {
+      if (!this.connectedSince) this.connectedSince = now;
+      if (this.state !== "CONNECTED" && this.state !== "AUTH_FAILED") this.state = "CONNECTED";
+    } else if (!this.stopped && this.state === "CONNECTING" && recentActivity) {
       this.state = "CONNECTED";
     }
 
-    const healthy = !this.stopped && this.state === "CONNECTED" && transportAlive && recentActivity;
+    const healthy = !this.stopped && this.state === "CONNECTED" && transportAlive;
 
     return {
       ok: healthy,
@@ -192,7 +195,6 @@ export class MqttConnectionManager extends EventEmitter {
       this.listener = this.api.listenMqtt((error, event) => {
         if (error) {
           this._recordError(error);
-          void this.reconnect("listener_error");
           return;
         }
         this._recordEvent(event);
@@ -354,7 +356,7 @@ export class MqttConnectionManager extends EventEmitter {
         // CRITICAL-03 FIX: لا تُطلق الـ watchdog أثناء CONNECTING / AUTH_FAILED / STOPPED.
         // المشكلة السابقة: إذا استغرق handshake MQTT أكثر من initialGraceMs (دقيقتان)،
         // كان الـ watchdog يقتل الجلسة الصحيحة لأن _socketAlive() يعيد false ريثما
-        // يُكمل fca-eryxenx إعداد مُوكّل الأحداث الداخلي.
+        // يُكمل fca-nx إعداد مُوكّل الأحداث الداخلي.
         if (this.state === "CONNECTING" || this.state === "AUTH_FAILED" || this.state === "STOPPED") {
           return; // انتظر الدورة القادمة — المعالجات الداخلية ستُبلِّغ عن أي خطأ حقيقي
         }
@@ -365,8 +367,11 @@ export class MqttConnectionManager extends EventEmitter {
         // that settling window; the transport's own error/close handlers remain
         // responsible for immediate failures.
         const transportAlive = this._socketAlive();
-        if (!settling && (!transportAlive || staleFor >= this.options.staleAfterMs)) {
-          await this.reconnect(transportAlive ? "stale" : "socket_not_alive");
+        if (!settling && !transportAlive) {
+          this.state = "DEGRADED";
+          this.lastReconnectReason = "transport_lost";
+        } else if (!settling && staleFor >= this.options.staleAfterMs && transportAlive) {
+          this.state = "CONNECTED";
         }
       } catch (error) {
         this._recordError(error, "WATCHDOG");
@@ -394,9 +399,8 @@ export class MqttConnectionManager extends EventEmitter {
         this.emit("ping_ok", this.health());
       }
       else if (this.state !== "AUTH_FAILED") {
-        const recentActivity = this.lastEventAt > 0 &&
-          Date.now() - this.lastEventAt < this.options.staleAfterMs;
-        if (!recentActivity) void this.reconnect("ping_failed");
+        this.state = "DEGRADED";
+        this.lastReconnectReason = "transport_unavailable";
       }
       this._schedulePing();
     }, this.options.pingIntervalMs);

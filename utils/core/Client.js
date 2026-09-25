@@ -64,7 +64,7 @@ export function saveAppStateForBot(state, botIndex = 1, source = "runtime") {
     const keys = new Set(state.map(c => String(c?.key ?? c?.name ?? "")));
     if (!keys.has("c_user") || !keys.has("xs")) throw new Error("cookies ناقصة");
     updateAppStateInMemory(state);
-    persistAppState(state, source);
+    persistAppState(state, source, botIndex);
     console.log(`[APPSTATE] ✅ (${state.length} cookie | Bot-${botIndex} | ${source})`);
     return true;
   } catch (err) {
@@ -77,9 +77,10 @@ export function saveAppStateForBot(state, botIndex = 1, source = "runtime") {
 const GLOBAL_OPTIONS = getFcaOptions();
 
 function getFallbackCredentials() {
-  const email    = String(process.env.FACEBOOK_EMAIL    || process.env.FB_EMAIL    || "").trim();
+  const email = String(process.env.FACEBOOK_EMAIL || process.env.FB_EMAIL || "").trim();
   const password = String(process.env.FACEBOOK_PASSWORD || process.env.FB_PASSWORD || "");
-  return email && password ? { email, password } : null;
+  const twofactor = String(process.env.FACEBOOK_2FA || process.env.FB_2FA || process.env.FACEBOOK_2FA_SECRET || process.env.FB_2FA_SECRET || "").replace(/\s+/g, "").trim();
+  return email && password ? { email, password, ...(twofactor ? { twofactor } : {}) } : null;
 }
 
 function loginWithCredentials(credentials, label) {

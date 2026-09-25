@@ -43,24 +43,24 @@ function parseCookieString(cookieStr) {
   return cookies;
 }
 
-// Try to auto-login using API and refresh web session
+// Try to auto-login locally using credentials and refresh web session
 async function tryAutoLogin(logger, config, ctx, defaultFuncs) {
-  const email = config.credentials?.email || config.email;
-  const password = config.credentials?.password || config.password;
-  const twofactor = config.credentials?.twofactor || config.twofactor || null;
+  const email = config.credentials?.email || config.email || process.env.FACEBOOK_EMAIL || process.env.FB_EMAIL;
+  const password = config.credentials?.password || config.password || process.env.FACEBOOK_PASSWORD || process.env.FB_PASSWORD;
+  const twofactor = config.credentials?.twofactor || config.twofactor || process.env.FACEBOOK_2FA || process.env.FB_2FA || process.env.FACEBOOK_2FA_SECRET || process.env.FB_2FA_SECRET || null;
 
   if (config.autoLogin === false || !email || !password) {
     return null;
   }
 
-  logger("getSeqID: attempting auto re-login via API...", "warn");
+  logger("getSeqID: attempting local credential re-login...", "warn");
 
   try {
     const result = await loginHelper.tokensViaAPI(
       email,
       password,
       twofactor,
-      config.apiServer || null
+      config
     );
 
     if (result && result.status) {
@@ -93,21 +93,17 @@ async function tryAutoLogin(logger, config, ctx, defaultFuncs) {
       if (cookiePairs.length > 0 || result.uid) {
         logger(`getSeqID: auto re-login successful! UID: ${result.uid}, Cookies: ${cookiePairs.length}`, "info");
 
-        if (ctx.jar && cookiePairs.length > 0) {
-          const expires = new Date(Date.now() + 31536e6).toUTCString();
-          for (const kv of cookiePairs) {
-            const cookieStr = `${kv}; expires=${expires}; domain=.facebook.com; path=/;`;
-            try {
-              if (typeof ctx.jar.setCookieSync === "function") {
-                ctx.jar.setCookieSync(cookieStr, "https://www.facebook.com");
-              } else if (typeof ctx.jar.setCookie === "function") {
-                await ctx.jar.setCookie(cookieStr, "https://www.facebook.com");
-              }
-            } catch (err) {
-              logger(`getSeqID: Failed to set cookie ${kv.substring(0, 50)}: ${err && err.message ? err.message : String(err)}`, "warn");
+        if (ctx.jar) {
+          try {
+            if (Array.isArray(result.cookies) && typeof loginHelper.setJarFromAppState === "function") {
+              loginHelper.setJarFromAppState(ctx.jar, result.cookies);
+            } else if (cookiePairs.length > 0 && typeof loginHelper.setJarFromPairs === "function") {
+              loginHelper.setJarFromPairs(ctx.jar, cookiePairs, ".facebook.com");
             }
+            logger(`getSeqID: applied ${cookiePairs.length || (Array.isArray(result.cookies) ? result.cookies.length : 0)} login cookies to jar`, "info");
+          } catch (err) {
+            logger(`getSeqID: Failed to apply login cookies: ${err && err.message ? err.message : String(err)}`, "warn");
           }
-          logger(`getSeqID: applied ${cookiePairs.length} API cookies to jar`, "info");
         }
 
         logger("getSeqID: refreshing web session after API login...", "info");
@@ -312,19 +308,14 @@ module.exports = function createGetSeqID(deps) {
             return getSeqID(defaultFuncs, api, ctx, globalCallback, form, retryCount + 1);
           }
 
-          // Authentication recovery belongs to the owning bot lifecycle.
-          // Keep fca-nx transport-only by default so MQTT failures do not
-          // silently turn into repeated account logins. Standalone callers
-          // can opt in with mqtt.autoRelogin=true.
-          if (ctx._mqttOpt?.autoRelogin === true) {
-            logger("getSeqID: auto re-login enabled; attempting recovery", "warn");
-            const config = getConfig();
-            const loginResult = await tryAutoLogin(logger, config, ctx, defaultFuncs);
-            if (loginResult) {
-              logger("getSeqID: retrying with new session...", "info");
-              await new Promise(resolve => setTimeout(resolve, 3000));
-              return getSeqID(defaultFuncs, api, ctx, globalCallback, form, 0);
-            }
+          logger("getSeqID: all retries failed, attempting auto re-login...", "warn");
+          const config = getConfig();
+          const loginResult = await tryAutoLogin(logger, config, ctx, defaultFuncs);
+
+          if (loginResult) {
+            logger("getSeqID: retrying with new session...", "info");
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            return getSeqID(defaultFuncs, api, ctx, globalCallback, form, 0);
           }
 
           if (/blocked/i.test(msg)) {

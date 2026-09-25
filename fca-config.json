@@ -26,13 +26,13 @@
   "mqtt": {
     "enabled": true,
     "autoReconnect": true,
-    "staleAfterMs": 480000,
-    "watchdogIntervalMs": 30000,
-    "pingIntervalMs": 120000,
-    "reconnectBaseMs": 2000,
-    "reconnectCapMs": 300000,
-    "cooldownMs": 900000,
+    "staleAfterMs": 1200000,
+    "watchdogIntervalMs": 60000,
+    "pingIntervalMs": 300000,
+    "reconnectBaseMs": 5000,
+    "reconnectCapMs": 120000,
+    "cooldownMs": 1200000,
     "authBlockCooldownMs": 5400000,
-    "maxFastAttempts": 10
+    "maxFastAttempts": 6
   }
 }

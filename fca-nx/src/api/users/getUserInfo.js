@@ -188,17 +188,16 @@ module.exports = function (defaultFuncs, api, ctx) {
   }
 
   const queue = [];
-  const MAX_QUEUE = 500;
-  const MAX_COOLDOWN_ENTRIES = 2000;
   let isProcessingQueue = false;
   const queuedUsers = new Set();
   const cooldown = new Map();
+  const MAX_COOLDOWN_ENTRIES = 2000;
+  const MAX_QUEUE_ENTRIES = 1000;
 
   function setCooldown(id, until) {
-    if (cooldown.size >= MAX_COOLDOWN_ENTRIES && !cooldown.has(id)) {
-      const oldest = cooldown.keys().next().value;
-      if (oldest !== undefined) cooldown.delete(oldest);
-    }
+    id = String(id);
+    cooldown.delete(id);
+    if (cooldown.size >= MAX_COOLDOWN_ENTRIES) cooldown.delete(cooldown.keys().next().value);
     cooldown.set(id, until);
   }
 
@@ -317,7 +316,7 @@ module.exports = function (defaultFuncs, api, ctx) {
 
   async function checkAndUpdateUsers() {
     try {
-      const all = await getAll("userID");
+      const all = await getAll(["userID", "updatedAt"]);
       const now = Date.now();
       for (const row of all) {
         const id = row.userID;
@@ -325,9 +324,8 @@ module.exports = function (defaultFuncs, api, ctx) {
         if (cd && now < cd) continue;
         const lastUpdated = new Date(row.updatedAt).getTime();
         if ((now - lastUpdated) / (1000 * 60) > 10 && !queuedUsers.has(id)) {
-          if (queue.length >= MAX_QUEUE) break;
           queuedUsers.add(id);
-          queue.push(() => refreshAUser(id));
+          if (queue.length < MAX_QUEUE_ENTRIES) queue.push(() => refreshAUser(id));
         }
       }
     } catch (e) {
@@ -354,7 +352,6 @@ module.exports = function (defaultFuncs, api, ctx) {
     checkAndUpdateUsers();
     processQueue();
   }, 10000);
-  updateInterval.unref?.();
 
   // Store interval in ctx for cleanup on logout/stop
   if (!ctx._userInfoIntervals) {

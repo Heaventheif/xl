@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+appstate.json
+appstate*.json
+*.session
+*.cookie
+fca-config.local.json
+node_modules/
+
+.appstate.enc
+.appstate.enc.*

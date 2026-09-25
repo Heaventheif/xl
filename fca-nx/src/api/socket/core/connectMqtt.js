@@ -7,11 +7,11 @@
 const { formatID } = require("../../../utils/format");
 const { getSessionIdentity } = require("../../../utils/clientIdentity");
 
-const DEFAULT_RECONNECT_DELAY_MS = 2000;
-const MAX_RECONNECT_DELAY_MS = 60000;
-const MAX_RECONNECT_ATTEMPTS = 10; // cap consecutive network-failure reconnects; does not apply to confirmed auth failures (those never reconnect)
-const MAX_RECONNECT_COOLDOWN_MS = 10 * 60 * 1000; // after exhausting fast retries, wait this long before trying again (never give up permanently)
-const T_MS_WAIT_TIMEOUT_MS = 15000;
+const DEFAULT_RECONNECT_DELAY_MS = 5000;
+const MAX_RECONNECT_DELAY_MS = 120000;
+const MAX_RECONNECT_ATTEMPTS = 6; // cap consecutive network-failure reconnects
+const MAX_RECONNECT_COOLDOWN_MS = 20 * 60 * 1000;
+const T_MS_WAIT_TIMEOUT_MS = 45000;
 
 // Exponential backoff with jitter, based on how many *consecutive* reconnect
 // attempts have happened for this session (reset to 0 on a successful
@@ -55,7 +55,7 @@ module.exports = function createListenMqtt(deps) {
         // the counter so normal exponential backoff resumes after that.
         const cooldownMs = Number(ctx._mqttOpt?.reconnectCooldownMs) || MAX_RECONNECT_COOLDOWN_MS;
         logger(`mqtt reconnect attempts exceeded (${maxAttempts}); backing off ${Math.round(cooldownMs / 60000)}min before trying again (not giving up)`, "error");
-        globalCallback({ type: "stop_listen", error: "Max reconnect attempts exceeded - will retry after cooldown" }, null);
+        // Keep the listener alive logically; the retry timer below owns recovery.
         ctx._reconnectAttempts = 0;
         ctx._reconnectTimer = setTimeout(() => {
           ctx._reconnectTimer = null;
@@ -140,10 +140,10 @@ module.exports = function createListenMqtt(deps) {
         protocolVersion: 13,
         binaryType: "arraybuffer"
       },
-      keepalive: 30,
+      keepalive: 60,
       reschedulePings: true,
       reconnectPeriod: 0,
-      connectTimeout: Number(ctx._mqttOpt?.connectTimeoutMs) || 15000
+      connectTimeout: Number(ctx._mqttOpt?.connectTimeoutMs) || 30000
     };
     if (ctx.globalOptions.proxy !== undefined) {
       const agent = new HttpsProxyAgent(ctx.globalOptions.proxy);
@@ -155,12 +155,7 @@ module.exports = function createListenMqtt(deps) {
       options
     );
     const mqttClient = ctx.mqttClient;
-    ctx._mqttLastPacketAt = Date.now();
-
-    mqttClient.on("packetreceive", function () {
-      if (!isCurrent()) return;
-      ctx._mqttLastPacketAt = Date.now();
-    });
+    api.__mqttClient = mqttClient;
 
     mqttClient.on("error", function (err) {
       if (!isCurrent()) return;
@@ -202,15 +197,24 @@ module.exports = function createListenMqtt(deps) {
         // ~2s indefinitely.
         scheduleReconnect();
       } else {
-        globalCallback({ type: "stop_listen", error: msg || "Connection refused" }, null);
+        // autoReconnect=false is an explicit caller choice; surface the error
+        // through the normal callback without asking consumers to stop the bot.
+        globalCallback({ type: "mqtt_error", error: msg || "Connection refused" }, null);
       }
     });
 
     mqttClient.on("connect", function () {
       if (!isCurrent()) return;
       ctx._cycling = false;
-      // TCP/MQTT connect alone is not enough to call the session healthy.
-      // The counter is reset only after /t_ms confirms the sync queue.
+      // Do not reset reconnect backoff immediately on socket connect.
+      // A socket can be accepted and then dropped during the handshake.
+      // Reset only after 60s of continuous connectivity to avoid rapid cycles.
+      if (ctx._mqttStableTimer) clearTimeout(ctx._mqttStableTimer);
+      ctx._mqttStableTimer = setTimeout(() => {
+        ctx._mqttStableTimer = null;
+        if (isCurrent() && mqttClient.connected && !ctx._ending) ctx._reconnectAttempts = 0;
+      }, 60_000);
+      ctx._mqttStableTimer.unref?.();
       if (ctx._rTimeout) {
         clearTimeout(ctx._rTimeout);
         ctx._rTimeout = null;
@@ -255,8 +259,6 @@ module.exports = function createListenMqtt(deps) {
         if (ctx._rTimeout) {
           delete ctx._rTimeout;
         }
-        ctx._reconnectAttempts = 0;
-        ctx._mqttLastPacketAt = Date.now();
         if (ctx.globalOptions.emitReady) globalCallback({ type: "ready", error: null });
         delete ctx.tmsWait;
       };

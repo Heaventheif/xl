@@ -17,16 +17,16 @@ const createListenMqtt = require("./core/connectMqtt");
 const createGetSeqID = require("./core/getSeqID");
 const getTaskResponseData = require("./core/getTaskResponseData");
 const createEmitAuth = require("./core/emitAuth");
+const createMiddlewareSystem = require("./middleware");
 
-// Reconnect is owned by connectMqtt.js. Periodic forced cycling is opt-in.
 const CYCLE_MS_DEFAULT = 0;
-const RECONNECT_DELAY_MS_DEFAULT = 3000;
+const RECONNECT_DELAY_MS_DEFAULT = 5000;
 const UNSUB_ALL_TIMEOUT_MS = 5000;
-const MAX_MQTT_RECONNECT_DELAY_MS = 60000;
-const MAX_MQTT_RECONNECT_COOLDOWN_MS = 10 * 60 * 1000; // long cooldown after exhausting fast retries - never give up permanently
-const MAX_MQTT_RECONNECT_ATTEMPTS = 10;
-const CONNECT_TIMEOUT_MS = 15000;
-const TMS_WAIT_TIMEOUT_MS = 15000;
+const MAX_MQTT_RECONNECT_DELAY_MS = 120000;
+const MAX_MQTT_RECONNECT_COOLDOWN_MS = 20 * 60 * 1000; // long cooldown after exhausting fast retries - never give up permanently
+const MAX_MQTT_RECONNECT_ATTEMPTS = 6;
+const CONNECT_TIMEOUT_MS = 30000;
+const TMS_WAIT_TIMEOUT_MS = 45000;
 
 const parseDelta = createParseDelta({ parseAndCheckLogin });
 const emitAuth = createEmitAuth({ logger });
@@ -51,7 +51,6 @@ const MQTT_DEFAULTS = {
     reconnectAfterStop: false,
     maxReconnectAttempts: MAX_MQTT_RECONNECT_ATTEMPTS,
     reconnectCooldownMs: MAX_MQTT_RECONNECT_COOLDOWN_MS,
-    autoRelogin: false,
     connectTimeoutMs: CONNECT_TIMEOUT_MS,
     tmsWaitTimeoutMs: TMS_WAIT_TIMEOUT_MS,
 };
@@ -67,9 +66,11 @@ function mqttConf(ctx, overrides) {
 module.exports = function (defaultFuncs, api, ctx, opts) {
     const identity = function () { };
     let globalCallback = identity;
-    let heartbeatTimer = null;
-    let lastPongTime = Date.now();
 
+    if (!ctx._middleware) {
+        ctx._middleware = createMiddlewareSystem();
+    }
+    const middleware = ctx._middleware;
 
     function installPostGuard() {
         if (ctx._postGuarded) return defaultFuncs.post;
@@ -108,7 +109,6 @@ module.exports = function (defaultFuncs, api, ctx, opts) {
     }
 
     function getSeqIDWrapper() {
-        if (ctx._getSeqIDPromise) return ctx._getSeqIDPromise;
         if (ctx._ending && !ctx._cycling) {
             logger("mqtt getSeqID skipped - ending", "warn");
             return Promise.resolve();
@@ -133,16 +133,12 @@ module.exports = function (defaultFuncs, api, ctx, opts) {
         };
 
         logger("mqtt getSeqID call", "info");
-        const run = getSeqIDFactory(defaultFuncs, api, ctx, globalCallback, form)
+        return getSeqIDFactory(defaultFuncs, api, ctx, globalCallback, form)
             .then(() => {
                 logger("mqtt getSeqID done", "info");
                 ctx._cycling = false;
                 reconnectAttempts = 0;
                 isReconnecting = false;
-                // connectMqtt.js owns the transport listeners, including packetreceive.
-                // Do not replace them here: doing so breaks packet tracking and can
-                // leave the connection manager blind after a successful getSeqID.
-                lastPongTime = Number(ctx._mqttLastPacketAt) || Date.now();
             })
             .catch(e => {
                 ctx._cycling = false;
@@ -158,7 +154,6 @@ module.exports = function (defaultFuncs, api, ctx, opts) {
                     if (reconnectAttempts > maxAttempts) {
                         const cooldownMs = conf.reconnectCooldownMs || MAX_MQTT_RECONNECT_COOLDOWN_MS;
                         logger(`mqtt getSeqID: max reconnect attempts exceeded, backing off ${Math.round(cooldownMs / 60000)}min before trying again (not giving up)`, "error");
-                        globalCallback({ type: "stop_listen", error: "Max reconnect attempts exceeded - will retry after cooldown" }, null);
                         reconnectAttempts = 0;
                         ctx._reconnectTimer = setTimeout(() => {
                             if (!ctx._ending) {
@@ -184,22 +179,12 @@ module.exports = function (defaultFuncs, api, ctx, opts) {
                         }
                     }, delay);
                 }
-            })
-            .finally(() => {
-                ctx._getSeqIDPromise = null;
             });
-        ctx._getSeqIDPromise = run;
-        return run;
     }
 
     function isConnected() {
         return !!(ctx.mqttClient && ctx.mqttClient.connected);
     }
-
-    // MQTT.js already maintains the transport with keepalive: 30.
-    // Do not force-cycle a quiet Messenger session based on packet silence;
-    // Facebook can legitimately have long periods without application packets.
-    function stopHeartbeat() {}
 
     function unsubAll(cb) {
         if (!isConnected()) {
@@ -243,15 +228,14 @@ module.exports = function (defaultFuncs, api, ctx, opts) {
     }
 
     function endQuietly(next) {
-        stopHeartbeat();
 
         const finish = () => {
+            const oldClient = ctx.mqttClient;
             try {
-                if (ctx.mqttClient) {
-                    ctx.mqttClient.removeAllListeners();
-                }
+                if (oldClient) oldClient.removeAllListeners();
             } catch (_) { }
 
+            if (api.__mqttClient === oldClient) api.__mqttClient = null;
             ctx.mqttClient = undefined;
             ctx.lastSeqId = null;
             ctx.syncToken = undefined;
@@ -266,6 +250,10 @@ module.exports = function (defaultFuncs, api, ctx, opts) {
             if (ctx._rTimeout) {
                 clearTimeout(ctx._rTimeout);
                 ctx._rTimeout = null;
+            }
+            if (ctx._mqttStableTimer) {
+                clearTimeout(ctx._mqttStableTimer);
+                ctx._mqttStableTimer = null;
             }
 
             if (ctx.tasks && ctx.tasks instanceof Map) {
@@ -345,7 +333,6 @@ module.exports = function (defaultFuncs, api, ctx, opts) {
         ctx._ending = true;
         logger("mqtt force cycle begin", "warn");
 
-        stopHeartbeat();
 
         unsubAll(() => {
             endQuietly(() => {
@@ -358,11 +345,24 @@ module.exports = function (defaultFuncs, api, ctx, opts) {
         });
     }
 
-    function attachClientListeners() {
-        // Transport listeners belong exclusively to connectMqtt.js. Keeping this
-        // hook as a no-op preserves the existing internal call sites without
-        // creating duplicate packet/close/error handlers.
+    function rewrapCallbackIfNeeded() {
+        if (!ctx.mqttClient || ctx._ending) return;
+
+        const hasMiddleware = middleware.count > 0;
+        const isWrapped = ctx._globalCallbackWrapped || false;
+
+        if (hasMiddleware && !isWrapped) {
+            ctx._globalCallbackWrapped = true;
+            globalCallback = middleware.wrapCallback(ctx._originalCallback || globalCallback);
+            logger("Middleware added - callback re-wrapped", "info");
+        } else if (!hasMiddleware && isWrapped) {
+            ctx._globalCallbackWrapped = false;
+            globalCallback = ctx._originalCallback || globalCallback;
+            logger("All middleware removed - callback unwrapped", "info");
+        }
     }
+
+    function attachClientListeners() {}
 
     return function (callback) {
         class MessageEmitter extends EventEmitter {
@@ -372,8 +372,7 @@ module.exports = function (defaultFuncs, api, ctx, opts) {
 
                 globalCallback = identity;
                 ctx._ending = true;
-                stopHeartbeat();
-
+        
                 if (ctx._autoCycleTimer) {
                     clearInterval(ctx._autoCycleTimer);
                     ctx._autoCycleTimer = null;
@@ -414,8 +413,13 @@ module.exports = function (defaultFuncs, api, ctx, opts) {
             msgEmitter.emit("message", message);
         };
 
-        ctx._globalCallbackWrapped = false;
-        globalCallback = ctx._originalCallback;
+        if (middleware.count > 0) {
+            ctx._globalCallbackWrapped = true;
+            globalCallback = middleware.wrapCallback(ctx._originalCallback);
+        } else {
+            ctx._globalCallbackWrapped = false;
+            globalCallback = ctx._originalCallback;
+        }
 
         conf = mqttConf(ctx, conf);
 
@@ -442,13 +446,59 @@ module.exports = function (defaultFuncs, api, ctx, opts) {
         } else {
             logger("mqtt starting listenMqtt", "info");
             listenMqtt(defaultFuncs, api, ctx, globalCallback);
-            attachClientListeners();
         }
 
         api.stopListening = msgEmitter.stopListening;
         api.stopListeningAsync = msgEmitter.stopListeningAsync;
         api.forceReconnect = forceCycle;
         api.isMqttConnected = isConnected;
+
+        api.useMiddleware = function (middlewareFn, fn) {
+            const result = middleware.use(middlewareFn, fn);
+            rewrapCallbackIfNeeded();
+            return result;
+        };
+
+        api.removeMiddleware = function (identifier) {
+            const result = middleware.remove(identifier);
+            rewrapCallbackIfNeeded();
+            return result;
+        };
+
+        api.clearMiddleware = function () {
+            const result = middleware.clear();
+            rewrapCallbackIfNeeded();
+            return result;
+        };
+
+        api.listMiddleware = function () {
+            return middleware.list();
+        };
+
+        api.setMiddlewareEnabled = function (name, enabled) {
+            const result = middleware.setEnabled(name, enabled);
+            rewrapCallbackIfNeeded();
+            return result;
+        };
+
+        const existingMiddlewareCount = Object.getOwnPropertyDescriptor(api, "middlewareCount");
+        if (!existingMiddlewareCount) {
+            Object.defineProperty(api, "middlewareCount", {
+                configurable: true,
+                enumerable: false,
+                get: function () {
+                    return (ctx._middleware && ctx._middleware.count) || 0;
+                }
+            });
+        } else if (existingMiddlewareCount.configurable) {
+            Object.defineProperty(api, "middlewareCount", {
+                configurable: true,
+                enumerable: existingMiddlewareCount.enumerable,
+                get: function () {
+                    return (ctx._middleware && ctx._middleware.count) || 0;
+                }
+            });
+        }
 
         return msgEmitter;
     };

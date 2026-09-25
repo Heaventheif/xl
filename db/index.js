@@ -62,7 +62,12 @@ export async function connectDB() {
         await withRetry((async () => {
             client = client || new MongoClient(uri, {
                 serverSelectionTimeoutMS: 8e3,
-                connectTimeoutMS: 8e3
+                connectTimeoutMS: 8e3,
+                maxPoolSize: 4,
+                minPoolSize: 0,
+                maxIdleTimeMS: 60_000,
+                retryReads: true,
+                retryWrites: true
             });
             await client.connect();
             database = client.db(process.env.MONGO_DB_NAME || "sunkenbot");
