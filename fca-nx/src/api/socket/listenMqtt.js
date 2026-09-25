@@ -25,8 +25,6 @@ const UNSUB_ALL_TIMEOUT_MS = 5000;
 const MAX_MQTT_RECONNECT_DELAY_MS = 60000;
 const MAX_MQTT_RECONNECT_COOLDOWN_MS = 10 * 60 * 1000; // long cooldown after exhausting fast retries - never give up permanently
 const MAX_MQTT_RECONNECT_ATTEMPTS = 10;
-const HEARTBEAT_INTERVAL_MS = 30000;
-const HEARTBEAT_TIMEOUT_MS = 10000;
 const CONNECT_TIMEOUT_MS = 15000;
 const TMS_WAIT_TIMEOUT_MS = 15000;
 
@@ -56,8 +54,6 @@ const MQTT_DEFAULTS = {
     autoRelogin: false,
     connectTimeoutMs: CONNECT_TIMEOUT_MS,
     tmsWaitTimeoutMs: TMS_WAIT_TIMEOUT_MS,
-    heartbeatInterval: HEARTBEAT_INTERVAL_MS,
-    heartbeatTimeout: HEARTBEAT_TIMEOUT_MS
 };
 
 function mqttConf(ctx, overrides) {
@@ -147,7 +143,6 @@ module.exports = function (defaultFuncs, api, ctx, opts) {
                 // Do not replace them here: doing so breaks packet tracking and can
                 // leave the connection manager blind after a successful getSeqID.
                 lastPongTime = Number(ctx._mqttLastPacketAt) || Date.now();
-                startHeartbeat();
             })
             .catch(e => {
                 ctx._cycling = false;
@@ -201,40 +196,10 @@ module.exports = function (defaultFuncs, api, ctx, opts) {
         return !!(ctx.mqttClient && ctx.mqttClient.connected);
     }
 
-    function startHeartbeat() {
-        stopHeartbeat();
-        if (!isConnected()) return;
-
-        lastPongTime = Date.now();
-
-        heartbeatTimer = setInterval(() => {
-            if (!isConnected()) {
-                stopHeartbeat();
-                return;
-            }
-
-            const now = Date.now();
-            const lastPacketAt = Number(ctx._mqttLastPacketAt) || lastPongTime;
-            const silenceMs = now - lastPacketAt;
-            const timeoutMs = (conf.heartbeatTimeout || HEARTBEAT_TIMEOUT_MS) * 3;
-            if (silenceMs > timeoutMs && !ctx._reconnectTimer) {
-                logger(`mqtt heartbeat: no packets for ${Math.round(silenceMs / 1000)}s, forcing reconnect`, "warn");
-                forceCycle();
-                return;
-            }
-
-            // mqtt.js already sends MQTT PINGREQ packets because connectMqtt.js
-            // uses keepalive: 30. Sending an additional application-level /ping
-            // every 30s only adds traffic and can mask the real transport state.
-        }, conf.heartbeatInterval || HEARTBEAT_INTERVAL_MS);
-    }
-
-    function stopHeartbeat() {
-        if (heartbeatTimer) {
-            clearInterval(heartbeatTimer);
-            heartbeatTimer = null;
-        }
-    }
+    // MQTT.js already maintains the transport with keepalive: 30.
+    // Do not force-cycle a quiet Messenger session based on packet silence;
+    // Facebook can legitimately have long periods without application packets.
+    function stopHeartbeat() {}
 
     function unsubAll(cb) {
         if (!isConnected()) {
@@ -478,7 +443,6 @@ module.exports = function (defaultFuncs, api, ctx, opts) {
             logger("mqtt starting listenMqtt", "info");
             listenMqtt(defaultFuncs, api, ctx, globalCallback);
             attachClientListeners();
-            startHeartbeat();
         }
 
         api.stopListening = msgEmitter.stopListening;
