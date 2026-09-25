@@ -28,7 +28,7 @@
     "autoReconnect": true,
     "staleAfterMs": 1200000,
     "watchdogIntervalMs": 60000,
-    "pingIntervalMs": 300000,
+    "pingIntervalMs": 240000,
     "reconnectBaseMs": 5000,
     "reconnectCapMs": 120000,
     "cooldownMs": 1200000,

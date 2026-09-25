@@ -2,7 +2,6 @@
 
 var utils = require("../../utils/utils");
 var logger = require("../../utils/logger");
-var bluebird = require("bluebird");
 
 var allowedProperties = {
     attachment: true, url: true, sticker: true, emoji: true,
@@ -29,7 +28,7 @@ module.exports = function (defaultFuncs, api, ctx) {
                     })
             );
         }
-        bluebird.all(uploads)
+        Promise.all(uploads)
             .then(resData => callback(null, resData))
             .catch(err => { logger.error("OldMessage.upload", err); callback(err); });
     }

@@ -10,7 +10,9 @@ const DEFAULTS = {
   cooldownMs: 15 * 60_000,
   authBlockCooldownMs: 90 * 60_000,  // ← 90 دقيقة انتظار عند login_blocked
   maxFastAttempts: 10,
-  pingIntervalMs: 300_000,
+  pingIntervalMs: 240_000,
+  eventBufferMax: 50,
+  structuralAlertThreshold: 20,
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -80,7 +82,12 @@ export class MqttConnectionManager extends EventEmitter {
     this._onEvent = typeof options.onEvent === "function" ? options.onEvent : null;
     this._onState = typeof options.onState === "function" ? options.onState : null;
     this._onAuthFailed = typeof options.onAuthFailed === "function" ? options.onAuthFailed : null;
+    this._onAlert = typeof options.onAlert === "function" ? options.onAlert : null;
     this.authRecoveryRunning = false;
+    this._processingEvent = false;
+    this._eventBuffer = [];
+    this.eventsDropped = 0;
+    this.totalCooldowns = 0;
   }
 
   start() {
@@ -107,6 +114,8 @@ export class MqttConnectionManager extends EventEmitter {
     this.authRetryTimer = null;
     this._authBlockedUntil = null;
     this.authRecoveryRunning = false;
+    this._eventBuffer.length = 0;
+    this._processingEvent = false;
     await this._stopListener();
     this._emitState();
   }
@@ -162,6 +171,9 @@ export class MqttConnectionManager extends EventEmitter {
       totalReconnects: this.totalReconnects,
       consecutiveErrors: this.consecutiveErrors,
       eventsReceived: this.eventsReceived,
+      eventsDropped: this.eventsDropped,
+      eventBufferLength: this._eventBuffer.length,
+      totalCooldowns: this.totalCooldowns,
       lastEventType: this.lastEventType,
       cooldownUntil: this.cooldownUntil > now ? new Date(this.cooldownUntil).toISOString() : null,
     };
@@ -198,21 +210,7 @@ export class MqttConnectionManager extends EventEmitter {
           return;
         }
         this._recordEvent(event);
-        if (event?.type === "friend_request_received" && event.actorFbId) {
-          const requests = this.api.__friendRequests ??= new Map();
-          requests.set(String(event.actorFbId), {
-            id: String(event.actorFbId),
-            timestamp: Number(event.timestamp) || Date.now()
-          });
-          while (requests.size > 100) requests.delete(requests.keys().next().value);
-        } else if (event?.type === "friend_request_cancel" && event.actorFbId) {
-          this.api.__friendRequests?.delete(String(event.actorFbId));
-        }
-        try {
-          this._onEvent?.(event);
-        } catch (handlerError) {
-          this._recordError(handlerError, "EVENT_HANDLER");
-        }
+        this._enqueueEvent(event);
       });
 
       clearTimeout(this.authRetryTimer);
@@ -297,9 +295,14 @@ export class MqttConnectionManager extends EventEmitter {
     if (ok) this.totalReconnects++;
 
     if (!ok && this.reconnectAttempts >= this.options.maxFastAttempts) {
-      this.cooldownUntil = Date.now() + this.options.cooldownMs;
+      this.totalCooldowns++;
+      const cooldownMs = Math.min(
+        this.options.cooldownMs * (2 ** Math.floor((this.totalCooldowns - 1) / 3)),
+        4 * 60 * 60_000
+      );
+      this.cooldownUntil = Date.now() + cooldownMs;
       this.state = "RECONNECT_WAIT";
-      this.emit("cooldown", this.health());
+      this.emit("cooldown", { ...this.health(), cooldownMs });
     }
     return ok;
   }
@@ -314,6 +317,49 @@ export class MqttConnectionManager extends EventEmitter {
       else await old.stopListening?.();
     } catch (error) {
       this._recordError(error, "STOP_LISTENER");
+    }
+  }
+
+  _enqueueEvent(event) {
+    if (this._processingEvent) {
+      if (this._eventBuffer.length < this.options.eventBufferMax) this._eventBuffer.push(event);
+      else {
+        this.eventsDropped++;
+        this.emit("event_dropped", { event, dropped: this.eventsDropped });
+      }
+      return;
+    }
+    this._processingEvent = true;
+    void this._drainEvents(event);
+  }
+
+  async _drainEvents(firstEvent) {
+    let event = firstEvent;
+    try {
+      while (event) {
+        try {
+          if (event?.type === "friend_request_received" && event.actorFbId) {
+            const requests = this.api.__friendRequests ??= new Map();
+            requests.set(String(event.actorFbId), {
+              id: String(event.actorFbId),
+              timestamp: Number(event.timestamp) || Date.now()
+            });
+            while (requests.size > 100) requests.delete(requests.keys().next().value);
+          } else if (event?.type === "friend_request_cancel" && event.actorFbId) {
+            this.api.__friendRequests?.delete(String(event.actorFbId));
+          }
+          await this._onEvent?.(event);
+        } catch (handlerError) {
+          this._recordError(handlerError, "EVENT_HANDLER");
+        }
+        event = this._eventBuffer.shift() || null;
+      }
+    } finally {
+      this._processingEvent = false;
+      if (this._eventBuffer.length) {
+        this._processingEvent = true;
+        void this._drainEvents(this._eventBuffer.shift());
+      }
     }
   }
 
@@ -343,6 +389,16 @@ export class MqttConnectionManager extends EventEmitter {
     if (errorClass === "AUTH_FAILED") this.state = "AUTH_FAILED";
     else if (this.state !== "STOPPED") this.state = "DEGRADED";
     this.emit("error_observed", { errorClass, message, at: this.lastErrorAt });
+    if (this.consecutiveErrors === this.options.structuralAlertThreshold) {
+      const alert = {
+        type: "structural_error_threshold",
+        consecutiveErrors: this.consecutiveErrors,
+        lastErrorClass: errorClass,
+        lastError: message,
+      };
+      this.emit("structural_alert", alert);
+      try { this._onAlert?.(alert); } catch (_) {}
+    }
     this._emitState();
   }
 

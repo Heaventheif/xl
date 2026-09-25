@@ -110,6 +110,17 @@ function _validateAppState(state) {
   return REQUIRED_COOKIES.every((key) => keys.has(key));
 }
 
+export function preserveDeviceFingerprint(previousState, nextState) {
+  if (String(process.env.APPSTATE_PRESERVE_DATR ?? "true").toLowerCase() === "false") return nextState;
+  const previousDatr = (previousState || []).find((cookie) => (cookie?.key ?? cookie?.name) === "datr");
+  if (!previousDatr?.value || !Array.isArray(nextState)) return nextState;
+  return nextState.map((cookie) =>
+    (cookie?.key ?? cookie?.name) === "datr"
+      ? { ...cookie, value: previousDatr.value }
+      : cookie
+  );
+}
+
 function _hashState(state) {
   try {
     return crypto
@@ -281,7 +292,8 @@ export function persistAppState(state, source = "auto", botIndex = 1) {
     console.warn(`[APPSTATE] ⚠️ persistAppState: invalid state (${source})`);
     return false;
   }
-  const normalized = _normalizeAppState(state);
+  const stabilizedState = preserveDeviceFingerprint(_inMemoryState, state);
+  const normalized = _normalizeAppState(stabilizedState);
   const newHash = _hashState(normalized);
   if (newHash === _inMemoryHash) return false;
 

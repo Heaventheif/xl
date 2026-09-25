@@ -55,7 +55,7 @@ export async function startMqttListener(api, opts = {}) {
     },
     onEvent: (event) => {
       if (global._pausedBots?.has(botIndex)) return;
-      try { onEvent?.(event, api); }
+      try { return onEvent?.(event, api); }
       catch (err) { console.error(`[EVENT:${label}]`, err.message); }
     },
     onAuthFailed,
@@ -66,6 +66,17 @@ export async function startMqttListener(api, opts = {}) {
   api.__stopWatchdog   = () => manager.stop();
   api.__mqttHealth     = manager.health();
 
+  manager.on("connected", async () => {
+    try {
+      const refresh = api.refreshFbDtsg ?? api.refreshFb_dtsg;
+      if (typeof refresh === "function") {
+        await refresh.call(api);
+        console.log(`[MQTT:${label}] ✅ fb_dtsg refreshed after connect`);
+      }
+    } catch (error) {
+      console.warn(`[MQTT:${label}] ⚠️ fb_dtsg refresh failed: ${error.message}`);
+    }
+  });
   manager.on("ping_ok",     () => {});
   manager.on("auth_failed", (h) =>
     console.error(`[MQTT:${label}] 🔒 AppState محجوب:`, h.lastError || "auth_failed"));
