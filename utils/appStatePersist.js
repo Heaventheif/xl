@@ -153,7 +153,7 @@ function _readDirectFile() {
 }
 
 function _writeDirectFile(state) {
-  const enabled = String(process.env.APPSTATE_WRITE_FILE ?? "true").trim().toLowerCase() !== "false";
+  const enabled = String(process.env.APPSTATE_WRITE_FILE ?? "false").trim().toLowerCase() === "true";
   const file = _sourceFile();
   if (!enabled || !file) return false;
   try {
@@ -192,14 +192,27 @@ function _readEncryptedFile() {
   }
 }
 
+
+export function assertAppStatePersistenceSecurity() {
+  const production = String(process.env.NODE_ENV || "").toLowerCase() === "production";
+  const required = String(process.env.APPSTATE_REQUIRE_ENCRYPTION || (production ? "true" : "false")).toLowerCase() === "true";
+  const key = String(process.env.APPSTATE_ENCRYPTION_KEY || "");
+  const raw = String(process.env.APPSTATE_WRITE_FILE || "false").toLowerCase() === "true";
+  if (required && !key) throw new Error("APPSTATE_ENCRYPTION_KEY مطلوب للتخزين الدائم في production");
+  if (production && raw && !key) throw new Error("APPSTATE_WRITE_FILE=true غير مسموح في production بدون APPSTATE_ENCRYPTION_KEY");
+}
+
 export function saveAppStateToDisk(state) {
   if (!_validateAppState(state)) return false;
   const normalized = _normalizeAppState(state);
   const key = _getEncryptionKey();
-  let saved = _writeDirectFile(normalized);
+  let saved = false;
   if (key) {
     const blob = _encrypt(JSON.stringify(normalized), key);
-    saved = _writeEncryptedFile(blob) || saved;
+    saved = _writeEncryptedFile(blob);
+  }
+  if (!key && String(process.env.APPSTATE_WRITE_FILE || "false").toLowerCase() === "true") {
+    saved = _writeDirectFile(normalized);
   }
   if (saved) console.log(`[APPSTATE] 💾 Persisted (${normalized.length} cookies)`);
   return saved;

@@ -14,7 +14,7 @@ The project is designed to:
 - Handle media downloads, splitting, streaming, and temporary-file cleanup.
 - Use Axios with connection reuse and retry-aware HTTP handling.
 - Keep memory usage bounded in long-running caches and concurrent downloads.
-- Run without a web dashboard or HTTP web server.
+- Includes a minimal HTTP server for deployment liveness (`/health`) and readiness (`/ready`) checks.
 
 The application starts from `index.js`.
 
@@ -72,8 +72,10 @@ Common variables used by the project include:
 |---|---|
 | `APPSTATE` | Facebook AppState used for login |
 | `APPSTATE_FILE` | AppState bootstrap/persistence file; defaults to `appstate.json` |
-| `APPSTATE_WRITE_FILE` | Write the refreshed AppState back to `APPSTATE_FILE` (`true` by default) |
+| `APPSTATE_WRITE_FILE` | Write the refreshed AppState back to `APPSTATE_FILE` (`false` by default; bootstrap only) |
 | `APPSTATE_PERSIST_FILE` | Optional encrypted local backup file; defaults to `.appstate.enc` |
+| `APPSTATE_SYNC_ENV` | Keep refreshed AppState in `process.env` (`false` by default) |
+| `APPSTATE_REQUIRE_ENCRYPTION` | Require encrypted AppState persistence (`true` in production by default) |
 | `APPSTATE_ENCRYPTION_KEY` | Encryption key required for encrypted local/Mongo AppState persistence |
 | `FACEBOOK_EMAIL` | Optional fallback login email |
 | `FACEBOOK_PASSWORD` | Optional fallback login password |

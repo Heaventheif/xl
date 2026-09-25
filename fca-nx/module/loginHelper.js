@@ -60,13 +60,129 @@ async function loginViaFacebookWeb(email, password, twoFactor = null, globalOpti
   const opts = globalOptions || {};
   const secret = normalizeSecret(twoFactor);
   const started = Date.now();
+  const cheerio = require("cheerio");
 
   if (!email || !password) return { ok: false, message: "Please provide email and password" };
 
+  const responseUrl = (res, fallback = "") => String(
+    res?.request?.res?.responseUrl ||
+    res?.request?.responseURL ||
+    res?.request?.res?.req?.res?.responseUrl ||
+    res?.headers?.location ||
+    res?.config?.url ||
+    fallback || ""
+  );
+
+  const bodyOf = (res) => String(res?.data ?? res?.body ?? "");
+
+  const hasUserCookie = async () => {
+    try {
+      const urls = ["https://www.facebook.com/", "https://facebook.com/"];
+      for (const url of urls) {
+        const cookies = await jar.getCookies(url);
+        if (cookies.some(c => (c.key === "c_user" || c.key === "i_user") && c.value)) return true;
+      }
+    } catch {}
+    return false;
+  };
+
+  const formInfo = (html) => {
+    const $ = cheerio.load(String(html || ""));
+    const forms = [];
+    $("form").each((_, el) => {
+      const names = [];
+      $(el).find("input[name]").each((__, input) => names.push(String($(input).attr("name") || "")));
+      const text = $(el).text().replace(/\s+/g, " ").trim().slice(0, 180);
+      forms.push({
+        action: String($(el).attr("action") || ""),
+        names,
+        text
+      });
+    });
+    return forms;
+  };
+
+  const isApprovalHtml = (html) => {
+    const lower = String(html || "").toLowerCase();
+    return /login-approval|approvals_code|name_action_selected|checkpointsubmitbutton|checkpoint\/|two-factor|two_factor|\b2fa\b/.test(lower);
+  };
+
+  const resolveAction = (form, fallback) => {
+    let action = String(form?.attr("action") || fallback || "");
+    try { return new URL(action, "https://www.facebook.com/").toString(); }
+    catch { return fallback; }
+  };
+
+  const submitApproval = async (html, fallbackUrl) => {
+    const $ = cheerio.load(String(html || ""));
+    const candidates = $("form").filter((_, el) => {
+      const names = $(el).find("input[name]").map((__, input) => String($(input).attr("name") || "")).get();
+      const text = $(el).text();
+      return names.some(n => /approvals_code|name_action_selected|checkpoint/i.test(n)) || /login approval|two-factor|security code|confirmation code/i.test(text);
+    });
+    const form = candidates.first().length ? candidates.first() : $("form").first();
+    if (!form.length) return { handled: false, body: html, url: fallbackUrl };
+
+    const data = {};
+    form.find("input[name]").each((_, el) => {
+      const name = String($(el).attr("name") || "");
+      if (name) data[name] = String($(el).attr("value") || "");
+    });
+
+    const action = resolveAction(form, fallbackUrl || "https://www.facebook.com/checkpoint/");
+    const names = Object.keys(data);
+    const needsCode = names.some(n => /approvals_code|approval|2fa|two.?factor|code/i.test(n)) || isApprovalHtml(html);
+
+    if (!needsCode) return { handled: false, body: html, url: action };
+    if (!secret) {
+      const err = new Error("Facebook requires 2FA approval; set FACEBOOK_2FA to the Base32 TOTP secret");
+      err.error = "login-approval";
+      err.loginUrl = action;
+      throw err;
+    }
+
+    const code = await generateTOTP(secret);
+    const codeField = names.includes("approvals_code") ? "approvals_code" :
+      (names.find(n => /verification.?code|security.?code|two.?factor|2fa|^code$/i.test(n)) || "approvals_code");
+    data[codeField] = code;
+
+    if (names.includes("submit[Continue]")) data["submit[Continue]"] = data["submit[Continue]"] || "Continue";
+    else if (names.includes("submit[Continue]")) data["submit[Continue]"] = "Continue";
+
+    logger(chalk.italic(`🔐 Facebook 2FA challenge detected (${codeField})`), "info");
+    const approvalResponse = await post(action, jar, data, opts);
+    const approvalBody = bodyOf(approvalResponse);
+    const approvalUrl = responseUrl(approvalResponse, action);
+
+    if (await hasUserCookie()) return { handled: true, body: approvalBody, url: approvalUrl };
+    if (/invalid|incorrect|wrong|expired/i.test(approvalBody) && /approvals_code|verification|security|two.?factor|2fa/i.test(approvalBody)) {
+      throw new Error("Facebook rejected the generated TOTP code");
+    }
+
+    const after$ = cheerio.load(approvalBody);
+    const reviewForms = after$("form").filter((_, el) => {
+      const names = after$(el).find("input[name]").map((__, input) => String(after$(input).attr("name") || "")).get();
+      return names.includes("name_action_selected") || /dont_save|save_browser|remember/i.test(after$(el).text());
+    });
+    if (reviewForms.first().length) {
+      const review = reviewForms.first();
+      const reviewData = {};
+      review.find("input[name]").each((_, el) => {
+        const name = String(after$(el).attr("name") || "");
+        if (name) reviewData[name] = String(after$(el).attr("value") || "");
+      });
+      reviewData.name_action_selected = "dont_save";
+      await post(resolveAction(review, approvalUrl), jar, reviewData, opts);
+    }
+
+    await get("https://www.facebook.com/", jar, null, opts);
+    return { handled: true, body: approvalBody, url: approvalUrl };
+  };
+
   try {
     const landing = await get("https://www.facebook.com/", jar, null, opts);
-    const html = String(landing?.data || landing?.body || "");
-    const $ = require("cheerio").load(html);
+    const html = bodyOf(landing);
+    const $ = cheerio.load(html);
     const loginForm = $("form").filter((_, el) => {
       const action = String($(el).attr("action") || "");
       return /login/i.test(action) || $(el).find('input[name="email"]').length || $(el).find('input[name="pass"]').length;
@@ -76,68 +192,55 @@ async function loginViaFacebookWeb(email, password, twoFactor = null, globalOpti
 
     const form = {};
     loginForm.find("input[name]").each((_, el) => {
-      const name = $(el).attr("name");
-      if (name) form[name] = $(el).attr("value") || "";
+      const name = String($(el).attr("name") || "");
+      if (name) form[name] = String($(el).attr("value") || "");
     });
     form.email = email;
     form.pass = password;
 
-    let action = loginForm.attr("action") || "/login/device-based/regular/login/?login_attempt=1&lwv=110";
-    try { action = new URL(action, "https://www.facebook.com/").toString(); } catch { action = "https://www.facebook.com/login/device-based/regular/login/?login_attempt=1&lwv=110"; }
-
+    const action = resolveAction(loginForm, "https://www.facebook.com/login/device-based/regular/login/?login_attempt=1&lwv=110");
     logger(chalk.italic(`🔐 Local Facebook login: ${mask(email, 2)}`), "info");
+
     let response = await post(action, jar, form, opts);
-    response = response || {};
+    let body = bodyOf(response);
+    let currentUrl = responseUrl(response, action);
 
-    let body = String(response.data || response.body || "");
-    let responseUrl = response?.request?.res?.responseUrl || response?.request?.responseURL || "";
-    let checkpointUrl = /checkpoint\//i.test(responseUrl) ? responseUrl : (/checkpoint\//i.test(body) ? responseUrl : "");
+    if (await hasUserCookie()) {
+      const cookies = await getAppState(jar);
+      logger(chalk.italic(`✅ Local Facebook login successful (${Date.now() - started}ms)`), "info");
+      return { ok: true, cookies, uid: cookies.find(c => c.key === "c_user" || c.key === "i_user")?.value || null };
+    }
 
-    const hasUserCookie = async () => {
-      try {
-        const cookies = await jar.getCookies("https://www.facebook.com");
-        return cookies.some(c => (c.key === "c_user" || c.key === "i_user") && c.value);
-      } catch { return false; }
-    };
-
-    if (!await hasUserCookie() && (checkpointUrl || /login-approval|approvals_code|checkpoint/i.test(body))) {
-      if (!checkpointUrl) checkpointUrl = "https://www.facebook.com/checkpoint/?next=https%3A%2F%2Fwww.facebook.com%2Fhome.php";
-      const checkpoint = await get(checkpointUrl, jar, null, opts);
-      body = String(checkpoint?.data || checkpoint?.body || "");
-      const cpUrl = checkpoint?.request?.res?.responseUrl || checkpointUrl;
-      const cp$ = require("cheerio").load(body);
-      const cpForm = cp$("form").first();
-      const approvalForm = {};
-      cpForm.find("input[name]").each((_, el) => {
-        const name = cp$(el).attr("name");
-        if (name) approvalForm[name] = cp$(el).attr("value") || "";
-      });
-
-      if (!secret) {
-        const err = new Error("Facebook requires 2FA approval; set FACEBOOK_2FA/FB_2FA to the Base32 TOTP secret");
-        err.error = "login-approval";
-        throw err;
+    // Facebook can return the approval/checkpoint form directly in the POST
+    // response; do not depend on a redirect URL being exposed by Axios.
+    if (isApprovalHtml(body) || /checkpoint|login-approval|approvals_code/i.test(currentUrl)) {
+      const handled = await submitApproval(body, currentUrl);
+      if (await hasUserCookie()) {
+        const cookies = await getAppState(jar);
+        logger(chalk.italic(`✅ Facebook 2FA login successful (${Date.now() - started}ms)`), "info");
+        return { ok: true, cookies, uid: cookies.find(c => c.key === "c_user" || c.key === "i_user")?.value || null };
       }
+      if (handled?.body) body = handled.body;
+      currentUrl = handled?.url || currentUrl;
+    }
 
-      const code = await generateTOTP(secret);
-      approvalForm.approvals_code = code;
-      approvalForm["submit[Continue]"] = cp$("#checkpointSubmitButton").text().trim() || "Continue";
-
-      const approvalResponse = await post(cpUrl, jar, approvalForm, opts);
-      const approvalBody = String(approvalResponse?.data || approvalResponse?.body || "");
-      if (/invalid|incorrect|wrong/i.test(approvalBody) && /approvals_code/i.test(approvalBody)) {
-        throw new Error("Facebook rejected the generated TOTP code");
+    // A few Facebook flows expose the challenge only after loading the
+    // returned location. Try that location before declaring login failure.
+    if (currentUrl && /facebook\.com/i.test(currentUrl) && /checkpoint|login|approval/i.test(currentUrl)) {
+      const challenge = await get(currentUrl, jar, null, opts);
+      const challengeBody = bodyOf(challenge);
+      if (isApprovalHtml(challengeBody)) {
+        await submitApproval(challengeBody, responseUrl(challenge, currentUrl));
       }
-
-      delete approvalForm.approvals_code;
-      delete approvalForm.no_fido;
-      approvalForm.name_action_selected = "dont_save";
-      await post(cpUrl, jar, approvalForm, opts);
-      await get("https://www.facebook.com/", jar, null, opts);
     }
 
     if (!await hasUserCookie()) {
-      throw new Error("Facebook login did not establish c_user/i_user cookie; credentials may be rejected or Facebook may require an unsupported verification step");
+      const forms = formInfo(body);
+      const formSummary = forms.slice(0, 4).map(f => `${f.action || "?"}[${f.names.slice(0, 8).join(",")}]`).join(" | ");
+      const title = String(cheerio.load(body)("title").first().text() || "").replace(/\s+/g, " ").trim().slice(0, 120);
+      const status = response?.status || response?.statusCode || "?";
+      const reason = isApprovalHtml(body) ? "verification/challenge returned" : "no authenticated cookie returned";
+      throw new Error(`Facebook login failed (${reason}; HTTP ${status}; title="${title}"; url="${currentUrl || "?"}"; forms=${formSummary || "none"})`);
     }
 
     const cookies = await getAppState(jar);

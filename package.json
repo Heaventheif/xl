@@ -8,7 +8,8 @@
     "node": ">=20"
   },
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node --test"
   },
   "dependencies": {
     "@vreden/youtube_scraper": "^1.2.9",

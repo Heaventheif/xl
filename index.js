@@ -4,6 +4,7 @@ global.__mainErrorHandlersInstalled = true;
 import path from "node:path";
 import "dotenv/config";
 import { checkEnv } from "./utils/envCheck.js";
+import { assertAppStatePersistenceSecurity } from "./utils/appStatePersist.js";
 import { logger, withRetry, isTransientError } from "./utils/resilience.js";
 import { connectDB, disconnectDB, health as dbHealth } from "./db/index.js";
 import { loadConfig } from "./utils/config/index.js";
@@ -50,6 +51,7 @@ global.log = {
 };
 
 checkEnv(PROJECT_ROOT);
+assertAppStatePersistenceSecurity();
 loadConfig(PROJECT_ROOT);
 const commandsDir = path.join(PROJECT_ROOT, "cmds");
 global.reloadCommands = () => loadCommands(commandsDir);

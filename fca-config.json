@@ -9,7 +9,7 @@
     "listenTyping": false,
     "updatePresence": false,
     "forceLogin": true,
-    "autoMarkRead": false,
+    "autoMarkRead": true,
     "autoReconnect": true,
     "online": true,
     "emitReady": true,
