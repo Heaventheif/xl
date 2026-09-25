@@ -225,7 +225,7 @@ export function loadAppStateFromDisk() {
 }
 
 export async function saveAppStateToMongo(state, botIndex = 1) {
-  if (!_validateAppState(state) || !isDBConnected()) return false;
+  if (!_validateAppState(state)) return false;
   const key = _getEncryptionKey();
   if (!key) return false;
   const normalized = _normalizeAppState(state);
@@ -299,7 +299,7 @@ export function persistAppState(state, source = "auto", botIndex = 1) {
   } catch (_) {}
 
   saveAppStateToDisk(normalized);
-  if (isDBConnected()) void saveAppStateToMongo(normalized, botIndex);
+  if (process.env.MONGO_URI) void saveAppStateToMongo(normalized, botIndex);
 
   console.log(`[APPSTATE] ✅ Persisted (${normalized.length} cookies | ${source})`);
   return true;

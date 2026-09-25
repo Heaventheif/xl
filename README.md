@@ -98,7 +98,7 @@ Common variables used by the project include:
 
 ```env
 APPSTATE_FILE=appstate.json
-APPSTATE_WRITE_FILE=true
+APPSTATE_WRITE_FILE=false
 APPSTATE_PERSIST_FILE=.appstate.enc
 APPSTATE_ENCRYPTION_KEY=<long-random-secret>
 MONGO_URI=mongodb://127.0.0.1:27017
