@@ -103,7 +103,7 @@ function publishLsRequestWithAck(mqttClient, content, requestId, timeout) {
         }
 
         mqttClient.on('message', onMessage);
-        mqttClient.publish('/ls_req', JSON.stringify(content), { qos: 0 }, err => {
+        mqttClient.publish('/ls_req', JSON.stringify(content), { qos: 1 }, err => {
             if (err) finish(err);
         });
     });

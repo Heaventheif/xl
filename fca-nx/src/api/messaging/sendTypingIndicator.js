@@ -56,7 +56,7 @@ module.exports = function (defaultFuncs, api, ctx) {
             type: 4
           }),
           {
-            qos: 0,
+            qos: 1,
             retain: false,
           }
         );

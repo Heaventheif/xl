@@ -55,7 +55,7 @@ export async function startMqttListener(api, opts = {}) {
     },
     onEvent: (event) => {
       if (global._pausedBots?.has(botIndex)) return;
-      try { return onEvent?.(event, api); }
+      try { onEvent?.(event, api); }
       catch (err) { console.error(`[EVENT:${label}]`, err.message); }
     },
     onAuthFailed,
@@ -66,17 +66,6 @@ export async function startMqttListener(api, opts = {}) {
   api.__stopWatchdog   = () => manager.stop();
   api.__mqttHealth     = manager.health();
 
-  manager.on("connected", async () => {
-    try {
-      const refresh = api.refreshFbDtsg ?? api.refreshFb_dtsg;
-      if (typeof refresh === "function") {
-        await refresh.call(api);
-        console.log(`[MQTT:${label}] ✅ fb_dtsg refreshed after connect`);
-      }
-    } catch (error) {
-      console.warn(`[MQTT:${label}] ⚠️ fb_dtsg refresh failed: ${error.message}`);
-    }
-  });
   manager.on("ping_ok",     () => {});
   manager.on("auth_failed", (h) =>
     console.error(`[MQTT:${label}] 🔒 AppState محجوب:`, h.lastError || "auth_failed"));
@@ -169,7 +158,7 @@ export async function initBotLifecycle(api, botIndex, opts = {}) {
     try {
       const extender = _createSessionExtender({
         api, botIndex,
-        healthCheckIntervalMs: sessionCfg.healthCheckIntervalMs,
+        checkIntervalMs:    sessionCfg.healthCheckIntervalMs,
         keepAliveIntervalMs:sessionCfg.keepAliveIntervalMs,
         refreshThresholdMs: sessionCfg.refreshThresholdMs,
         criticalThresholdMs:sessionCfg.criticalThresholdMs,
@@ -177,23 +166,9 @@ export async function initBotLifecycle(api, botIndex, opts = {}) {
         onExtended: ({ count }) => {
           try {
             const s = api.getAppState?.();
-            if (s?.length) saveAppState(s, botIndex, "updated");
+            if (s?.length) saveAppState(s, botIndex, "extended");
           } catch (_) {}
-          console.log(`[EXTENDER:${label}] 📦 AppState updated #${count}`);
-        },
-        onCritical: async () => {
-          const recover = api?.__ctx?.performAutoLogin;
-          if (typeof recover !== "function") return false;
-          try {
-            const ok = await recover();
-            if (ok) {
-              const s = api.getAppState?.();
-              if (s?.length) saveAppState(s, botIndex, "credential-recovery");
-            }
-            return Boolean(ok);
-          } catch (_) {
-            return false;
-          }
+          console.log(`[EXTENDER:${label}] 📦 تمديد #${count}`);
         },
       });
       extender.start();

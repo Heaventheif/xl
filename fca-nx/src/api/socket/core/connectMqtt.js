@@ -1,5 +1,11 @@
 "use strict";
 
+// Randomize MQTT keepalive per-connection (45-75s) to avoid fixed-interval fingerprint
+// Source: fca-unofficial analysis + PDF architectural recommendation
+const _randomKeepAlive = () => 45 + Math.floor(Math.random() * 30);
+// Non-deterministic forceCycle interval (±15%) to avoid periodic reconnect fingerprint
+const _jitteredCycle = (ms) => Math.round(ms * (0.85 + Math.random() * 0.3));
+
 /**
  * MQTT/WebSocket listener for Facebook Messenger real-time events.
  * Connects to edge-chat.facebook.com, subscribes to topics, parses deltas and typing/presence.
@@ -7,11 +13,11 @@
 const { formatID } = require("../../../utils/format");
 const { getSessionIdentity } = require("../../../utils/clientIdentity");
 
-const DEFAULT_RECONNECT_DELAY_MS = 5000;
-const MAX_RECONNECT_DELAY_MS = 120000;
-const MAX_RECONNECT_ATTEMPTS = 6; // cap consecutive network-failure reconnects
-const MAX_RECONNECT_COOLDOWN_MS = 20 * 60 * 1000;
-const T_MS_WAIT_TIMEOUT_MS = 45000;
+const DEFAULT_RECONNECT_DELAY_MS = 2000;
+const MAX_RECONNECT_DELAY_MS = 60000;
+const MAX_RECONNECT_ATTEMPTS = 10; // cap consecutive network-failure reconnects; does not apply to confirmed auth failures (those never reconnect)
+const MAX_RECONNECT_COOLDOWN_MS = 10 * 60 * 1000; // after exhausting fast retries, wait this long before trying again (never give up permanently)
+const T_MS_WAIT_TIMEOUT_MS = 15000;
 
 // Exponential backoff with jitter, based on how many *consecutive* reconnect
 // attempts have happened for this session (reset to 0 on a successful
@@ -55,7 +61,7 @@ module.exports = function createListenMqtt(deps) {
         // the counter so normal exponential backoff resumes after that.
         const cooldownMs = Number(ctx._mqttOpt?.reconnectCooldownMs) || MAX_RECONNECT_COOLDOWN_MS;
         logger(`mqtt reconnect attempts exceeded (${maxAttempts}); backing off ${Math.round(cooldownMs / 60000)}min before trying again (not giving up)`, "error");
-        // Keep the listener alive logically; the retry timer below owns recovery.
+        globalCallback({ type: "stop_listen", error: "Max reconnect attempts exceeded - will retry after cooldown" }, null);
         ctx._reconnectAttempts = 0;
         ctx._reconnectTimer = setTimeout(() => {
           ctx._reconnectTimer = null;
@@ -140,10 +146,10 @@ module.exports = function createListenMqtt(deps) {
         protocolVersion: 13,
         binaryType: "arraybuffer"
       },
-      keepalive: 60,
+      keepalive: 30,
       reschedulePings: true,
       reconnectPeriod: 0,
-      connectTimeout: Number(ctx._mqttOpt?.connectTimeoutMs) || 30000
+      connectTimeout: Number(ctx._mqttOpt?.connectTimeoutMs) || 15000
     };
     if (ctx.globalOptions.proxy !== undefined) {
       const agent = new HttpsProxyAgent(ctx.globalOptions.proxy);
@@ -155,7 +161,6 @@ module.exports = function createListenMqtt(deps) {
       options
     );
     const mqttClient = ctx.mqttClient;
-    api.__mqttClient = mqttClient;
 
     mqttClient.on("error", function (err) {
       if (!isCurrent()) return;
@@ -197,24 +202,18 @@ module.exports = function createListenMqtt(deps) {
         // ~2s indefinitely.
         scheduleReconnect();
       } else {
-        // autoReconnect=false is an explicit caller choice; surface the error
-        // through the normal callback without asking consumers to stop the bot.
-        globalCallback({ type: "mqtt_error", error: msg || "Connection refused" }, null);
+        globalCallback({ type: "stop_listen", error: msg || "Connection refused" }, null);
       }
     });
 
     mqttClient.on("connect", function () {
       if (!isCurrent()) return;
       ctx._cycling = false;
-      // Do not reset reconnect backoff immediately on socket connect.
-      // A socket can be accepted and then dropped during the handshake.
-      // Reset only after 60s of continuous connectivity to avoid rapid cycles.
-      if (ctx._mqttStableTimer) clearTimeout(ctx._mqttStableTimer);
-      ctx._mqttStableTimer = setTimeout(() => {
-        ctx._mqttStableTimer = null;
-        if (isCurrent() && mqttClient.connected && !ctx._ending) ctx._reconnectAttempts = 0;
-      }, 60_000);
-      ctx._mqttStableTimer.unref?.();
+      // A successful connect means the session/identity/network are fine -
+      // reset the backoff counter so a later transient failure starts a
+      // fresh backoff sequence instead of inheriting a long delay from an
+      // unrelated earlier outage.
+      ctx._reconnectAttempts = 0;
       if (ctx._rTimeout) {
         clearTimeout(ctx._rTimeout);
         ctx._rTimeout = null;
@@ -229,9 +228,9 @@ module.exports = function createListenMqtt(deps) {
       };
       const topic = ctx.syncToken ? "/messenger_sync_get_diffs" : "/messenger_sync_create_queue";
       if (ctx.syncToken) { queue.last_seq_id = ctx.lastSeqId; queue.sync_token = ctx.syncToken; }
-      mqttClient.publish(topic, JSON.stringify(queue), { qos: 0, retain: false });
-      mqttClient.publish("/foreground_state", JSON.stringify({ foreground: chatOn }), { qos: 0 });
-      mqttClient.publish("/set_client_settings", JSON.stringify({ make_user_available_when_in_foreground: true }), { qos: 0 });
+      mqttClient.publish(topic, JSON.stringify(queue), { qos: 1, retain: false });
+      mqttClient.publish("/foreground_state", JSON.stringify({ foreground: chatOn }), { qos: 1 });
+      mqttClient.publish("/set_client_settings", JSON.stringify({ make_user_available_when_in_foreground: true }), { qos: 1 });
       let rTimeout = setTimeout(function () {
         if (!isCurrent()) return;
         rTimeout = null;

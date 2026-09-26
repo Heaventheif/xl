@@ -7,6 +7,7 @@
 const { getType } = require("../../../utils/format");
 const { parseAndCheckLogin } = require("../../../utils/client");
 const path = require("path");
+const loginHelper = require("../../../../module/loginHelper");
 
 function getConfig() {
   try {
@@ -42,9 +43,149 @@ function parseCookieString(cookieStr) {
   return cookies;
 }
 
-// Try to auto-login locally using credentials and refresh web session
-async function tryAutoLogin() {
-  // Credential login is intentionally disabled; recover only through AppState refresh.
+// Try to auto-login using API and refresh web session
+async function tryAutoLogin(logger, config, ctx, defaultFuncs) {
+  const email = config.credentials?.email || config.email;
+  const password = config.credentials?.password || config.password;
+  const twofactor = config.credentials?.twofactor || config.twofactor || null;
+
+  if (config.autoLogin === false || !email || !password) {
+    return null;
+  }
+
+  logger("getSeqID: attempting auto re-login via API...", "warn");
+
+  try {
+    const result = await loginHelper.tokensViaAPI(
+      email,
+      password,
+      twofactor,
+      config.apiServer || null
+    );
+
+    if (result && result.status) {
+      const normalizeCookieHeaderString = loginHelper.normalizeCookieHeaderString;
+      let cookiePairs = [];
+
+      if (typeof result.cookies === "string") {
+        cookiePairs = normalizeCookieHeaderString(result.cookies);
+      } 
+      else if (Array.isArray(result.cookies)) {
+        cookiePairs = result.cookies.map(c => {
+          if (typeof c === "string") return c;
+          if (c && typeof c === "object") return `${c.key || c.name}=${c.value}`;
+          return null;
+        }).filter(Boolean);
+      }
+      
+      if (cookiePairs.length === 0 && result.cookie) {
+        if (typeof result.cookie === "string") {
+          cookiePairs = normalizeCookieHeaderString(result.cookie);
+        } else if (Array.isArray(result.cookie)) {
+          cookiePairs = result.cookie.map(c => {
+            if (typeof c === "string") return c;
+            if (c && typeof c === "object") return `${c.key || c.name}=${c.value}`;
+            return null;
+          }).filter(Boolean);
+        }
+      }
+
+      if (cookiePairs.length > 0 || result.uid) {
+        logger(`getSeqID: auto re-login successful! UID: ${result.uid}, Cookies: ${cookiePairs.length}`, "info");
+
+        if (ctx.jar && cookiePairs.length > 0) {
+          const expires = new Date(Date.now() + 31536e6).toUTCString();
+          for (const kv of cookiePairs) {
+            const cookieStr = `${kv}; expires=${expires}; domain=.facebook.com; path=/;`;
+            try {
+              if (typeof ctx.jar.setCookieSync === "function") {
+                ctx.jar.setCookieSync(cookieStr, "https://www.facebook.com");
+              } else if (typeof ctx.jar.setCookie === "function") {
+                await ctx.jar.setCookie(cookieStr, "https://www.facebook.com");
+              }
+            } catch (err) {
+              logger(`getSeqID: Failed to set cookie ${kv.substring(0, 50)}: ${err && err.message ? err.message : String(err)}`, "warn");
+            }
+          }
+          logger(`getSeqID: applied ${cookiePairs.length} API cookies to jar`, "info");
+        }
+
+        logger("getSeqID: refreshing web session after API login...", "info");
+        try {
+          const { get } = require("../../../utils/request");
+          const { saveCookies: saveWebCookies } = require("../../../utils/client");
+
+          let webResponse = null;
+          let htmlContent = "";
+          const htmlUID = body => {
+            const s = typeof body === "string" ? body : String(body ?? "");
+            return s.match(/"USER_ID"\s*:\s*"(\d+)"/)?.[1] || s.match(/\["CurrentUserInitialData",\[\],\{.*?"USER_ID":"(\d+)".*?\},\d+\]/)?.[1];
+          };
+          const isValidUID = uid => uid && uid !== "0" && /^\d+$/.test(uid) && parseInt(uid, 10) > 0;
+          const urlsToTry = ["https://m.facebook.com/", "https://www.facebook.com/"];
+
+          for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+              const urlToUse = attempt === 0 ? urlsToTry[0] : urlsToTry[attempt % urlsToTry.length];
+              logger(`getSeqID: Refreshing ${urlToUse} (attempt ${attempt + 1}/3)...`, "info");
+              
+              webResponse = await get(urlToUse, ctx.jar, null, ctx.globalOptions, ctx);
+              if (webResponse && webResponse.data) {
+                await saveWebCookies(ctx.jar)(webResponse);
+                htmlContent = typeof webResponse.data === "string" ? webResponse.data : String(webResponse.data || "");
+                
+                const htmlUserID = htmlUID(htmlContent);
+                if (isValidUID(htmlUserID)) {
+                  logger(`getSeqID: Found valid USER_ID in HTML from ${urlToUse}: ${htmlUserID}`, "info");
+                  break;
+                } else if (attempt < 2) {
+                  logger(`getSeqID: No valid USER_ID in HTML from ${urlToUse} (attempt ${attempt + 1}/3), retrying...`, "warn");
+                  await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
+                }
+              }
+            } catch (refreshErr) {
+              logger(`getSeqID: Error refreshing session (attempt ${attempt + 1}/3): ${refreshErr && refreshErr.message ? refreshErr.message : String(refreshErr)}`, "warn");
+              if (attempt < 2) {
+                await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
+              }
+            }
+          }
+
+          if (webResponse && webResponse.data) {
+            const updatedCookies = await ctx.jar.getCookies("https://www.facebook.com");
+            logger(`getSeqID: refreshed session, now have ${updatedCookies.length} web cookies`, "info");
+            
+            const htmlUserID = htmlUID(htmlContent);
+            if (!isValidUID(htmlUserID)) {
+              logger("getSeqID: WARNING - HTML does not show valid USER_ID after refresh. Session may not be fully established.", "warn");
+            }
+            
+            if (ctx) {
+              ctx.loggedIn = true;
+              if (isValidUID(htmlUserID)) {
+                ctx.userID = htmlUserID;
+                logger(`getSeqID: Updated ctx.userID from HTML: ${htmlUserID}`, "info");
+              } else if (result.uid && isValidUID(result.uid)) {
+                ctx.userID = result.uid;
+                logger(`getSeqID: Updated ctx.userID from API: ${result.uid}`, "info");
+              }
+            }
+          } else {
+            logger("getSeqID: Failed to refresh web session after API login", "error");
+          }
+        } catch (refreshErr) {
+          logger(`getSeqID: web session refresh failed - ${refreshErr && refreshErr.message ? refreshErr.message : String(refreshErr)}`, "warn");
+        }
+
+        return { ...result, cookies: parseCookieString(result.cookies || result.cookie) };
+      }
+    }
+
+    logger(`getSeqID: auto re-login failed - ${result && result.message ? result.message : "unknown error"}`, "error");
+  } catch (loginErr) {
+    logger(`getSeqID: auto re-login error - ${loginErr && loginErr.message ? loginErr.message : String(loginErr)}`, "error");
+  }
+
   return null;
 }
 

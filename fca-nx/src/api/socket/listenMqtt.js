@@ -4,6 +4,8 @@
  */
 
 "use strict";
+const MqttHealthManager = require("./core/mqttHealthManager");
+
 const mqtt = require("mqtt");
 const WebSocket = require("ws");
 const HttpsProxyAgent = require("https-proxy-agent");
@@ -19,14 +21,16 @@ const getTaskResponseData = require("./core/getTaskResponseData");
 const createEmitAuth = require("./core/emitAuth");
 const createMiddlewareSystem = require("./middleware");
 
-const CYCLE_MS_DEFAULT = 0;
-const RECONNECT_DELAY_MS_DEFAULT = 5000;
+const CYCLE_MS_DEFAULT = 60 * 60 * 1000;
+const RECONNECT_DELAY_MS_DEFAULT = 3000;
 const UNSUB_ALL_TIMEOUT_MS = 5000;
-const MAX_MQTT_RECONNECT_DELAY_MS = 120000;
-const MAX_MQTT_RECONNECT_COOLDOWN_MS = 20 * 60 * 1000; // long cooldown after exhausting fast retries - never give up permanently
-const MAX_MQTT_RECONNECT_ATTEMPTS = 6;
-const CONNECT_TIMEOUT_MS = 30000;
-const TMS_WAIT_TIMEOUT_MS = 45000;
+const MAX_MQTT_RECONNECT_DELAY_MS = 60000;
+const MAX_MQTT_RECONNECT_COOLDOWN_MS = 10 * 60 * 1000; // long cooldown after exhausting fast retries - never give up permanently
+const MAX_MQTT_RECONNECT_ATTEMPTS = 10;
+const HEARTBEAT_INTERVAL_MS = 30000;
+const HEARTBEAT_TIMEOUT_MS = 10000;
+const CONNECT_TIMEOUT_MS = 15000;
+const TMS_WAIT_TIMEOUT_MS = 15000;
 
 const parseDelta = createParseDelta({ parseAndCheckLogin });
 const emitAuth = createEmitAuth({ logger });
@@ -48,11 +52,13 @@ const MQTT_DEFAULTS = {
     cycleMs: CYCLE_MS_DEFAULT,
     reconnectDelayMs: RECONNECT_DELAY_MS_DEFAULT,
     autoReconnect: true,
-    reconnectAfterStop: true,
+    reconnectAfterStop: false,
     maxReconnectAttempts: MAX_MQTT_RECONNECT_ATTEMPTS,
-    reconnectCooldownMs: 3 * 60 * 1000,
+    reconnectCooldownMs: MAX_MQTT_RECONNECT_COOLDOWN_MS,
     connectTimeoutMs: CONNECT_TIMEOUT_MS,
     tmsWaitTimeoutMs: TMS_WAIT_TIMEOUT_MS,
+    heartbeatInterval: HEARTBEAT_INTERVAL_MS,
+    heartbeatTimeout: HEARTBEAT_TIMEOUT_MS
 };
 
 function mqttConf(ctx, overrides) {
@@ -66,6 +72,8 @@ function mqttConf(ctx, overrides) {
 module.exports = function (defaultFuncs, api, ctx, opts) {
     const identity = function () { };
     let globalCallback = identity;
+    let heartbeatTimer = null;
+    let lastPongTime = Date.now();
 
     if (!ctx._middleware) {
         ctx._middleware = createMiddlewareSystem();
@@ -139,6 +147,21 @@ module.exports = function (defaultFuncs, api, ctx, opts) {
                 ctx._cycling = false;
                 reconnectAttempts = 0;
                 isReconnecting = false;
+                // FIX: after getSeqID completes, connectMqtt.js has already set up
+                // its own close/error handlers internally — we must NOT call the full
+                // attachClientListeners() here (that would remove those handlers and
+                // cause the puback/double-connection bug seen in the logs).
+                // We only need "packetreceive" to keep lastPongTime fresh so the
+                // heartbeat does not call forceCycle() every ~60s due to a stale timestamp.
+                if (ctx.mqttClient) {
+                    ctx.mqttClient.removeAllListeners("packetreceive");
+                    ctx.mqttClient.on("packetreceive", (packet) => {
+                        lastPongTime = Date.now();
+                        if (packet && packet.cmd === "pingresp")
+                            logger("mqtt pong received", "debug");
+                    });
+                }
+                startHeartbeat();
             })
             .catch(e => {
                 ctx._cycling = false;
@@ -154,6 +177,7 @@ module.exports = function (defaultFuncs, api, ctx, opts) {
                     if (reconnectAttempts > maxAttempts) {
                         const cooldownMs = conf.reconnectCooldownMs || MAX_MQTT_RECONNECT_COOLDOWN_MS;
                         logger(`mqtt getSeqID: max reconnect attempts exceeded, backing off ${Math.round(cooldownMs / 60000)}min before trying again (not giving up)`, "error");
+                        globalCallback({ type: "stop_listen", error: "Max reconnect attempts exceeded - will retry after cooldown" }, null);
                         reconnectAttempts = 0;
                         ctx._reconnectTimer = setTimeout(() => {
                             if (!ctx._ending) {
@@ -184,6 +208,41 @@ module.exports = function (defaultFuncs, api, ctx, opts) {
 
     function isConnected() {
         return !!(ctx.mqttClient && ctx.mqttClient.connected);
+    }
+
+    function startHeartbeat() {
+        stopHeartbeat();
+        if (!isConnected()) return;
+
+        lastPongTime = Date.now();
+
+        heartbeatTimer = setInterval(() => {
+            if (!isConnected()) {
+                stopHeartbeat();
+                return;
+            }
+
+            const now = Date.now();
+            if (now - lastPongTime > (conf.heartbeatTimeout || HEARTBEAT_TIMEOUT_MS) * 3) {
+                logger("mqtt heartbeat: no response, forcing reconnect", "warn");
+                forceCycle();
+                return;
+            }
+
+            try {
+                ctx.mqttClient.publish("/ping", JSON.stringify({ timestamp: Date.now() }), { qos: 0 });
+                logger("mqtt heartbeat sent", "debug");
+            } catch (err) {
+                logger(`mqtt heartbeat error: ${err.message}`, "warn");
+            }
+        }, conf.heartbeatInterval || HEARTBEAT_INTERVAL_MS);
+    }
+
+    function stopHeartbeat() {
+        if (heartbeatTimer) {
+            clearInterval(heartbeatTimer);
+            heartbeatTimer = null;
+        }
     }
 
     function unsubAll(cb) {
@@ -228,14 +287,15 @@ module.exports = function (defaultFuncs, api, ctx, opts) {
     }
 
     function endQuietly(next) {
+        stopHeartbeat();
 
         const finish = () => {
-            const oldClient = ctx.mqttClient;
             try {
-                if (oldClient) oldClient.removeAllListeners();
+                if (ctx.mqttClient) {
+                    ctx.mqttClient.removeAllListeners();
+                }
             } catch (_) { }
 
-            if (api.__mqttClient === oldClient) api.__mqttClient = null;
             ctx.mqttClient = undefined;
             ctx.lastSeqId = null;
             ctx.syncToken = undefined;
@@ -250,10 +310,6 @@ module.exports = function (defaultFuncs, api, ctx, opts) {
             if (ctx._rTimeout) {
                 clearTimeout(ctx._rTimeout);
                 ctx._rTimeout = null;
-            }
-            if (ctx._mqttStableTimer) {
-                clearTimeout(ctx._mqttStableTimer);
-                ctx._mqttStableTimer = null;
             }
 
             if (ctx.tasks && ctx.tasks instanceof Map) {
@@ -333,6 +389,7 @@ module.exports = function (defaultFuncs, api, ctx, opts) {
         ctx._ending = true;
         logger("mqtt force cycle begin", "warn");
 
+        stopHeartbeat();
 
         unsubAll(() => {
             endQuietly(() => {
@@ -362,7 +419,30 @@ module.exports = function (defaultFuncs, api, ctx, opts) {
         }
     }
 
-    function attachClientListeners() {}
+    function attachClientListeners() {
+        if (!ctx.mqttClient) return;
+
+        ctx.mqttClient.removeAllListeners("packetreceive");
+        ctx.mqttClient.removeAllListeners("close");
+        ctx.mqttClient.removeAllListeners("error");
+
+        // so lastPongTime was never refreshed and the heartbeat below kept
+        // force-reconnecting the account roughly every minute (this is what
+        // looked like periodic auto logout). The library's own keepalive
+        // (keepalive: 30 in connectMqtt.js) sends PINGREQ/PINGRESP
+        // internally; we detect the PINGRESP via "packetreceive" instead.
+        // Any other incoming packet (e.g. real messages) also proves the
+        // connection is alive, so it counts too.
+        ctx.mqttClient.on("packetreceive", (packet) => {
+            lastPongTime = Date.now();
+            if (packet && packet.cmd === "pingresp") {
+                logger("mqtt pong received", "debug");
+            }
+        });
+
+        // close/error are owned by connectMqtt.js. Registering another pair here
+        // caused duplicate reconnect scheduling and could race with getSeqID.
+    }
 
     return function (callback) {
         class MessageEmitter extends EventEmitter {
@@ -372,7 +452,8 @@ module.exports = function (defaultFuncs, api, ctx, opts) {
 
                 globalCallback = identity;
                 ctx._ending = true;
-        
+                stopHeartbeat();
+
                 if (ctx._autoCycleTimer) {
                     clearInterval(ctx._autoCycleTimer);
                     ctx._autoCycleTimer = null;
@@ -446,6 +527,8 @@ module.exports = function (defaultFuncs, api, ctx, opts) {
         } else {
             logger("mqtt starting listenMqtt", "info");
             listenMqtt(defaultFuncs, api, ctx, globalCallback);
+            attachClientListeners();
+            startHeartbeat();
         }
 
         api.stopListening = msgEmitter.stopListening;

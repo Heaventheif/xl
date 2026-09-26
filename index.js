@@ -4,7 +4,6 @@ global.__mainErrorHandlersInstalled = true;
 import path from "node:path";
 import "dotenv/config";
 import { checkEnv } from "./utils/envCheck.js";
-import { assertAppStatePersistenceSecurity } from "./utils/appStatePersist.js";
 import { logger, withRetry, isTransientError } from "./utils/resilience.js";
 import { connectDB, disconnectDB, health as dbHealth } from "./db/index.js";
 import { loadConfig } from "./utils/config/index.js";
@@ -51,7 +50,6 @@ global.log = {
 };
 
 checkEnv(PROJECT_ROOT);
-assertAppStatePersistenceSecurity();
 loadConfig(PROJECT_ROOT);
 const commandsDir = path.join(PROJECT_ROOT, "cmds");
 global.reloadCommands = () => loadCommands(commandsDir);
@@ -61,7 +59,7 @@ async function start() {
   await connectDB();
   await loadCommands(commandsDir);
   const appState = await loadAppState();
-  if (!appState) throw new Error("AppState غير موجود أو غير صالح؛ سجّل الدخول باستخدام AppState فقط");
+  if (!appState) throw new Error("APPSTATE مطلوب — أضِفه في متغيرات البيئة");
   const loginTask = () => loginBot(appState);
   await withRetry(loginTask, {
     label: "facebook-login",

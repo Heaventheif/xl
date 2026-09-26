@@ -1,5 +1,5 @@
 {
-  "autoLogin": false,
+  "autoLogin": true,
   "autoUpdate": false,
   "processErrorHandlers": true,
   "options": {
@@ -26,13 +26,13 @@
   "mqtt": {
     "enabled": true,
     "autoReconnect": true,
-    "staleAfterMs": 1200000,
-    "watchdogIntervalMs": 60000,
-    "pingIntervalMs": 240000,
-    "reconnectBaseMs": 5000,
-    "reconnectCapMs": 120000,
-    "cooldownMs": 180000,
-    "authBlockCooldownMs": 180000,
-    "maxFastAttempts": 6
+    "staleAfterMs": 480000,
+    "watchdogIntervalMs": 30000,
+    "pingIntervalMs": 120000,
+    "reconnectBaseMs": 2000,
+    "reconnectCapMs": 300000,
+    "cooldownMs": 900000,
+    "authBlockCooldownMs": 5400000,
+    "maxFastAttempts": 10
   }
 }

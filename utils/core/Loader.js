@@ -40,7 +40,7 @@ function collectCommandFiles(commandsDir) {
 }
 
 function loadOverrides(commandsDir) {
-  const overridesPath = path.join(commandsDir, "..", "cmd-overrides.json");
+  const overridesPath = path.join(commandsDir, "..", "..", "cmd-overrides.json");
   global.cmdOverridesPath = path.resolve(overridesPath);
   try {
     if (fs.existsSync(overridesPath)) {
@@ -105,7 +105,8 @@ export async function loadCommands(commandsDir) {
   }
 
   // تبديل ذري: الرسائل الواردة أثناء التحميل تجد global.commands كاملاً دائماً
-  global.commands = newCommands;
+  global.commands.clear();
+  for (const [k, v] of newCommands) global.commands.set(k, v);
   global.eventCommands = newEventCmds;
 
   console.log(`[INFO] تم تحميل ${global.commands.size} أمر من أصل ${filePaths.length} ملف`);

@@ -189,17 +189,9 @@ module.exports = function (defaultFuncs, api, ctx) {
 
   const queue = [];
   let isProcessingQueue = false;
+  const processingUsers = new Set();
   const queuedUsers = new Set();
   const cooldown = new Map();
-  const MAX_COOLDOWN_ENTRIES = 2000;
-  const MAX_QUEUE_ENTRIES = 1000;
-
-  function setCooldown(id, until) {
-    id = String(id);
-    cooldown.delete(id);
-    if (cooldown.size >= MAX_COOLDOWN_ENTRIES) cooldown.delete(cooldown.keys().next().value);
-    cooldown.set(id, until);
-  }
 
   const dbFiles = fs.readdirSync(path.join(__dirname, "../../database"))
     .filter(f => path.extname(f) === ".js")
@@ -305,9 +297,9 @@ module.exports = function (defaultFuncs, api, ctx) {
   async function refreshAUser(id) {
     try {
       const out = await fetchAndPersist([id], false);
-      if (!out[id]) setCooldown(id, Date.now() + 5 * 60 * 1000);
+      if (!out[id]) cooldown.set(id, Date.now() + 5 * 60 * 1000);
     } catch (e) {
-      setCooldown(id, Date.now() + 5 * 60 * 1000);
+      cooldown.set(id, Date.now() + 5 * 60 * 1000);
       logger(`refresh user ${id} error: ${e?.message || e}`, "warn");
     } finally {
       queuedUsers.delete(id);
@@ -316,7 +308,7 @@ module.exports = function (defaultFuncs, api, ctx) {
 
   async function checkAndUpdateUsers() {
     try {
-      const all = await getAll(["userID", "updatedAt"]);
+      const all = await getAll("userID");
       const now = Date.now();
       for (const row of all) {
         const id = row.userID;
@@ -325,7 +317,7 @@ module.exports = function (defaultFuncs, api, ctx) {
         const lastUpdated = new Date(row.updatedAt).getTime();
         if ((now - lastUpdated) / (1000 * 60) > 10 && !queuedUsers.has(id)) {
           queuedUsers.add(id);
-          if (queue.length < MAX_QUEUE_ENTRIES) queue.push(() => refreshAUser(id));
+          queue.push(() => refreshAUser(id));
         }
       }
     } catch (e) {

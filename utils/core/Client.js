@@ -64,7 +64,7 @@ export function saveAppStateForBot(state, botIndex = 1, source = "runtime") {
     const keys = new Set(state.map(c => String(c?.key ?? c?.name ?? "")));
     if (!keys.has("c_user") || !keys.has("xs")) throw new Error("cookies ناقصة");
     updateAppStateInMemory(state);
-    persistAppState(state, source, botIndex);
+    persistAppState(state, source);
     console.log(`[APPSTATE] ✅ (${state.length} cookie | Bot-${botIndex} | ${source})`);
     return true;
   } catch (err) {
@@ -73,9 +73,8 @@ export function saveAppStateForBot(state, botIndex = 1, source = "runtime") {
   }
 }
 
-// ── خيارات fca-nx (متطابقة مع واجهة FCA القياسية) ───────────────────────────
+// ── خيارات fca-nx ─────────────────────────────────────────────────────────────
 const GLOBAL_OPTIONS = getFcaOptions();
-
 
 async function initializeBot(api, index, label, replacedApi = null) {
   if (replacedApi && replacedApi !== api) {
@@ -85,22 +84,19 @@ async function initializeBot(api, index, label, replacedApi = null) {
   }
 
   await initBotLifecycle(api, index, {
-    saveAppState: saveAppStateForBot,
-    onMqttEvent:  (event, _api) => dispatchMqttEvent(_api, event, label),
+    saveAppState:    saveAppStateForBot,
+    onMqttEvent:     (event, _api) => dispatchMqttEvent(_api, event, label),
     onFirstBotReady: () => startCleanupInterval(),
     getBotName, saveBotName, createMqttConnectionManager,
-    onAuthFailed: async () => {
-      console.warn(`[AUTH:${label}] ⚠️ AppState غير صالح؛ لا يوجد تسجيل دخول بديل مفعّل`);
-      return false;
-    },
+    // لا يوجد onAuthFailed — AppState فقط، لا استرداد بالبريد
   });
 }
 
-// ── تسجيل الدخول ─────────────────────────────────────────────────────────────
+// ── تسجيل الدخول بـ AppState فقط ─────────────────────────────────────────────
 export function loginBot(account) {
   const { state, index } = account;
   const label = `Bot-${index}`;
-  console.log(`[LOGIN:${label}] 🔑 تسجيل الدخول بـ AppState (fca-nx)...`);
+  console.log(`[LOGIN:${label}] 🔑 تسجيل الدخول بـ AppState...`);
 
   return new Promise((resolve, reject) => {
     login({ appState: state }, GLOBAL_OPTIONS, async (err, api) => {
@@ -116,8 +112,5 @@ export function loginBot(account) {
   });
 }
 
-
 export const loginBotWithAppState = loginBot;
-export { loadBotNames };
-
-export { stopCleanupInterval };
+export { loadBotNames, stopCleanupInterval };

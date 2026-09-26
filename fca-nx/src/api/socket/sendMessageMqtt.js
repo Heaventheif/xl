@@ -79,7 +79,7 @@ module.exports = function (defaultFuncs, api, ctx) {
             ctx.reqCallbacks[requestId] = callback;
         }
 
-        mqttClient.publish('/ls_req', JSON.stringify(content), { qos: 0 });
+        mqttClient.publish('/ls_req', JSON.stringify(content), { qos: 1 });
         return Promise.resolve({ requestId });
     };
 };

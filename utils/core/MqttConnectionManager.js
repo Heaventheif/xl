@@ -1,18 +1,16 @@
 import { EventEmitter } from "node:events";
 
 const DEFAULTS = {
-  staleAfterMs: 20 * 60_000,
+  staleAfterMs: 8 * 60_000,
   initialGraceMs: 2 * 60_000,
-  watchdogIntervalMs: 60_000,
+  watchdogIntervalMs: 30_000,
   stableWindowMs: 5 * 60_000,
   reconnectBaseMs: 2_000,
   reconnectCapMs: 5 * 60_000,
-  cooldownMs: 3 * 60_000,
+  cooldownMs: 15 * 60_000,
   authBlockCooldownMs: 90 * 60_000,  // ← 90 دقيقة انتظار عند login_blocked
   maxFastAttempts: 10,
-  pingIntervalMs: 240_000,
-  eventBufferMax: 50,
-  structuralAlertThreshold: 20,
+  pingIntervalMs: 120_000,
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -62,8 +60,6 @@ export class MqttConnectionManager extends EventEmitter {
     this.watchdogTimer = null;
     this.pingTimer = null;
     this.authRetryTimer = null;
-    this.cooldownRetryTimer = null;
-    this.cooldownRetryTimer = null;
     this._authBlockedUntil = null;
     this.cooldownUntil = 0;
     this.connectedSince = 0;
@@ -84,12 +80,7 @@ export class MqttConnectionManager extends EventEmitter {
     this._onEvent = typeof options.onEvent === "function" ? options.onEvent : null;
     this._onState = typeof options.onState === "function" ? options.onState : null;
     this._onAuthFailed = typeof options.onAuthFailed === "function" ? options.onAuthFailed : null;
-    this._onAlert = typeof options.onAlert === "function" ? options.onAlert : null;
     this.authRecoveryRunning = false;
-    this._processingEvent = false;
-    this._eventBuffer = [];
-    this.eventsDropped = 0;
-    this.totalCooldowns = 0;
   }
 
   start() {
@@ -111,14 +102,11 @@ export class MqttConnectionManager extends EventEmitter {
     clearTimeout(this.watchdogTimer);
     clearTimeout(this.pingTimer);
     clearTimeout(this.authRetryTimer);
-    clearTimeout(this.cooldownRetryTimer);
     this.watchdogTimer = null;
     this.pingTimer = null;
     this.authRetryTimer = null;
     this._authBlockedUntil = null;
     this.authRecoveryRunning = false;
-    this._eventBuffer.length = 0;
-    this._processingEvent = false;
     await this._stopListener();
     this._emitState();
   }
@@ -145,14 +133,11 @@ export class MqttConnectionManager extends EventEmitter {
 
     // If the raw client is not exposed by fca-nx, recent MQTT events still
     // prove that the listener is alive. Keep the public state accurate.
-    if (!this.stopped && socketConnected) {
-      if (!this.connectedSince) this.connectedSince = now;
-      if (this.state !== "CONNECTED" && this.state !== "AUTH_FAILED") this.state = "CONNECTED";
-    } else if (!this.stopped && this.state === "CONNECTING" && recentActivity) {
+    if (!this.stopped && this.state === "CONNECTING" && recentActivity) {
       this.state = "CONNECTED";
     }
 
-    const healthy = !this.stopped && this.state === "CONNECTED" && transportAlive;
+    const healthy = !this.stopped && this.state === "CONNECTED" && transportAlive && recentActivity;
 
     return {
       ok: healthy,
@@ -174,9 +159,6 @@ export class MqttConnectionManager extends EventEmitter {
       totalReconnects: this.totalReconnects,
       consecutiveErrors: this.consecutiveErrors,
       eventsReceived: this.eventsReceived,
-      eventsDropped: this.eventsDropped,
-      eventBufferLength: this._eventBuffer.length,
-      totalCooldowns: this.totalCooldowns,
       lastEventType: this.lastEventType,
       cooldownUntil: this.cooldownUntil > now ? new Date(this.cooldownUntil).toISOString() : null,
     };
@@ -210,10 +192,25 @@ export class MqttConnectionManager extends EventEmitter {
       this.listener = this.api.listenMqtt((error, event) => {
         if (error) {
           this._recordError(error);
+          void this.reconnect("listener_error");
           return;
         }
         this._recordEvent(event);
-        this._enqueueEvent(event);
+        if (event?.type === "friend_request_received" && event.actorFbId) {
+          const requests = this.api.__friendRequests ??= new Map();
+          requests.set(String(event.actorFbId), {
+            id: String(event.actorFbId),
+            timestamp: Number(event.timestamp) || Date.now()
+          });
+          while (requests.size > 100) requests.delete(requests.keys().next().value);
+        } else if (event?.type === "friend_request_cancel" && event.actorFbId) {
+          this.api.__friendRequests?.delete(String(event.actorFbId));
+        }
+        try {
+          this._onEvent?.(event);
+        } catch (handlerError) {
+          this._recordError(handlerError, "EVENT_HANDLER");
+        }
       });
 
       clearTimeout(this.authRetryTimer);
@@ -281,14 +278,6 @@ export class MqttConnectionManager extends EventEmitter {
     if (Date.now() < this.cooldownUntil) {
       this.state = "RECONNECT_WAIT";
       this._emitState();
-      if (!this.cooldownRetryTimer) {
-        const remaining = Math.max(1000, this.cooldownUntil - Date.now());
-        this.cooldownRetryTimer = setTimeout(() => {
-          this.cooldownRetryTimer = null;
-          if (!this.stopped) void this.reconnect("cooldown_retry");
-        }, remaining);
-        this.cooldownRetryTimer.unref?.();
-      }
       return false;
     }
 
@@ -306,20 +295,9 @@ export class MqttConnectionManager extends EventEmitter {
     if (ok) this.totalReconnects++;
 
     if (!ok && this.reconnectAttempts >= this.options.maxFastAttempts) {
-      this.totalCooldowns++;
-      const cooldownMs = Math.min(
-        this.options.cooldownMs * (2 ** Math.floor((this.totalCooldowns - 1) / 3)),
-        4 * 60 * 60_000
-      );
-      this.cooldownUntil = Date.now() + cooldownMs;
+      this.cooldownUntil = Date.now() + this.options.cooldownMs;
       this.state = "RECONNECT_WAIT";
-      this.emit("cooldown", { ...this.health(), cooldownMs });
-      clearTimeout(this.cooldownRetryTimer);
-      this.cooldownRetryTimer = setTimeout(() => {
-        this.cooldownRetryTimer = null;
-        if (!this.stopped) void this.reconnect("cooldown_retry");
-      }, cooldownMs);
-      this.cooldownRetryTimer.unref?.();
+      this.emit("cooldown", this.health());
     }
     return ok;
   }
@@ -334,49 +312,6 @@ export class MqttConnectionManager extends EventEmitter {
       else await old.stopListening?.();
     } catch (error) {
       this._recordError(error, "STOP_LISTENER");
-    }
-  }
-
-  _enqueueEvent(event) {
-    if (this._processingEvent) {
-      if (this._eventBuffer.length < this.options.eventBufferMax) this._eventBuffer.push(event);
-      else {
-        this.eventsDropped++;
-        this.emit("event_dropped", { event, dropped: this.eventsDropped });
-      }
-      return;
-    }
-    this._processingEvent = true;
-    void this._drainEvents(event);
-  }
-
-  async _drainEvents(firstEvent) {
-    let event = firstEvent;
-    try {
-      while (event) {
-        try {
-          if (event?.type === "friend_request_received" && event.actorFbId) {
-            const requests = this.api.__friendRequests ??= new Map();
-            requests.set(String(event.actorFbId), {
-              id: String(event.actorFbId),
-              timestamp: Number(event.timestamp) || Date.now()
-            });
-            while (requests.size > 100) requests.delete(requests.keys().next().value);
-          } else if (event?.type === "friend_request_cancel" && event.actorFbId) {
-            this.api.__friendRequests?.delete(String(event.actorFbId));
-          }
-          await this._onEvent?.(event);
-        } catch (handlerError) {
-          this._recordError(handlerError, "EVENT_HANDLER");
-        }
-        event = this._eventBuffer.shift() || null;
-      }
-    } finally {
-      this._processingEvent = false;
-      if (this._eventBuffer.length) {
-        this._processingEvent = true;
-        void this._drainEvents(this._eventBuffer.shift());
-      }
     }
   }
 
@@ -406,21 +341,6 @@ export class MqttConnectionManager extends EventEmitter {
     if (errorClass === "AUTH_FAILED") this.state = "AUTH_FAILED";
     else if (this.state !== "STOPPED") this.state = "DEGRADED";
     this.emit("error_observed", { errorClass, message, at: this.lastErrorAt });
-    if (!this.stopped && !this.reconnectPromise && errorClass !== "EVENT_HANDLER") {
-      setImmediate(() => {
-        if (!this.stopped) void this.reconnect(`error:${errorClass.toLowerCase()}`);
-      });
-    }
-    if (this.consecutiveErrors === this.options.structuralAlertThreshold) {
-      const alert = {
-        type: "structural_error_threshold",
-        consecutiveErrors: this.consecutiveErrors,
-        lastErrorClass: errorClass,
-        lastError: message,
-      };
-      this.emit("structural_alert", alert);
-      try { this._onAlert?.(alert); } catch (_) {}
-    }
     this._emitState();
   }
 
@@ -445,12 +365,8 @@ export class MqttConnectionManager extends EventEmitter {
         // that settling window; the transport's own error/close handlers remain
         // responsible for immediate failures.
         const transportAlive = this._socketAlive();
-        if (!settling && !transportAlive) {
-          this.state = "DEGRADED";
-          this.lastReconnectReason = "transport_lost";
-          void this.reconnect("watchdog_transport_lost");
-        } else if (!settling && staleFor >= this.options.staleAfterMs && transportAlive) {
-          this.state = "CONNECTED";
+        if (!settling && (!transportAlive || staleFor >= this.options.staleAfterMs)) {
+          await this.reconnect(transportAlive ? "stale" : "socket_not_alive");
         }
       } catch (error) {
         this._recordError(error, "WATCHDOG");
@@ -478,9 +394,9 @@ export class MqttConnectionManager extends EventEmitter {
         this.emit("ping_ok", this.health());
       }
       else if (this.state !== "AUTH_FAILED") {
-        this.state = "DEGRADED";
-        this.lastReconnectReason = "transport_unavailable";
-        void this.reconnect("ping_transport_unavailable");
+        const recentActivity = this.lastEventAt > 0 &&
+          Date.now() - this.lastEventAt < this.options.staleAfterMs;
+        if (!recentActivity) void this.reconnect("ping_failed");
       }
       this._schedulePing();
     }, this.options.pingIntervalMs);

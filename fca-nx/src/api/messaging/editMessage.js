@@ -99,7 +99,7 @@ module.exports = function (defaultFuncs, api, ctx) {
     }, 5000);
 
     ctx.mqttClient.on("message", handleRes);
-    ctx.mqttClient.publish("/ls_req", JSON.stringify(context), { qos: 0, retain: false });
+    ctx.mqttClient.publish("/ls_req", JSON.stringify(context), { qos: 1, retain: false });
 
     return returnPromise;
   };

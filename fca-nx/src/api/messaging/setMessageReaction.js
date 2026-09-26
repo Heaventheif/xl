@@ -82,7 +82,7 @@ module.exports = function (defaultFuncs, api, ctx) {
         return resolve({ success: true });
       };
       ctx.mqttClient.on("message", handleResponse);
-      ctx.mqttClient.publish("/ls_req", JSON.stringify(mqttForm), { qos: 0, retain: false }, (err) => {
+      ctx.mqttClient.publish("/ls_req", JSON.stringify(mqttForm), { qos: 1, retain: false }, (err) => {
         if (err) {
           ctx.mqttClient.removeListener("message", handleResponse);
           logger("setMessageReaction" + err, "error");

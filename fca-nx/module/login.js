@@ -26,6 +26,11 @@ if (!global.fca._errorHandlersInstalled && !global.__mainErrorHandlersInstalled)
         const errorCode = reason.code || reason.cause?.code;
         const errorMessage = reason.message || String(reason);
 
+        // Suppress Sequelize instance errors (handled gracefully in getBackupModel)
+        if (errorMessage.includes("No Sequelize instance passed")) {
+          return; // Silently ignore - already handled
+        }
+
         // Handle fetch timeout errors gracefully
         if (errorCode === "UND_ERR_CONNECT_TIMEOUT" ||
             errorCode === "ETIMEDOUT" ||
@@ -61,6 +66,11 @@ if (!global.fca._errorHandlersInstalled && !global.__mainErrorHandlersInstalled)
     try {
       const errorMessage = error.message || String(error);
       const errorCode = error.code;
+
+      // Suppress Sequelize instance errors (handled gracefully in getBackupModel)
+      if (errorMessage.includes("No Sequelize instance passed")) {
+        return; // Silently ignore - already handled
+      }
 
       // Handle fetch/network errors
       if (errorCode === "UND_ERR_CONNECT_TIMEOUT" ||
@@ -154,12 +164,6 @@ function login(loginData, options, callback) {
     };
     callback = prCallback;
   }
-  if (loginData?.email || loginData?.password || loginData?.twofactor || loginData?.twoFactor || loginData?.two_factor) {
-    const error = new Error("Credential login is disabled; provide a valid AppState.");
-    error.error = "credentials_login_disabled";
-    callback(error);
-    return returnPromise;
-  }
   const loginKey = extractLoginKey(loginData);
   if (loginKey && global.fca._activeLogins.has(loginKey)) {
     const err = new Error("A login attempt for this account is already in progress.");
@@ -174,7 +178,7 @@ function login(loginData, options, callback) {
     callback(error, api);
   };
 
-  const proceed = () => loginHelper(loginData.appState, loginData.Cookie, null, null, globalOptions, wrappedCallback, prCallback, null);
+  const proceed = () => loginHelper(loginData.appState, loginData.Cookie, loginData.email, loginData.password, globalOptions, wrappedCallback, prCallback);
   if (config && config.autoUpdate) {
     const p = checkAndUpdateVersion();
     if (p && typeof p.then === "function") {

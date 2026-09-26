@@ -74,7 +74,7 @@ module.exports = function (defaultFuncs, api, ctx) {
     };
 
     try {
-      ctx.mqttClient.publish("/ls_req", JSON.stringify(content), { qos: 0, retain: false });
+      ctx.mqttClient.publish("/ls_req", JSON.stringify(content), { qos: 1, retain: false });
     } catch (err) {
       const e = { error: "Failed to publish pinMessage: " + (err && err.message ? err.message : String(err)) };
       callback(e);

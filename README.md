@@ -14,7 +14,7 @@ The project is designed to:
 - Handle media downloads, splitting, streaming, and temporary-file cleanup.
 - Use Axios with connection reuse and retry-aware HTTP handling.
 - Keep memory usage bounded in long-running caches and concurrent downloads.
-- Includes a minimal HTTP server for deployment liveness (`/health`) and readiness (`/ready`) checks.
+- Run without a web dashboard or HTTP web server.
 
 The application starts from `index.js`.
 
@@ -24,8 +24,8 @@ The application starts from `index.js`.
 
 - **Node.js:** `>= 20`
 - **npm:** compatible with your Node.js installation
-- **MongoDB:** recommended for persistent AppState and bot data across restarts/deploys
-- A valid **Facebook AppState** for the FCA login flow; email/password login is disabled
+- **MongoDB:** recommended for persistent database-backed features
+- A valid **Facebook AppState** for the FCA login flow
 
 Check your Node.js version:
 
@@ -71,12 +71,10 @@ Common variables used by the project include:
 | Variable | Purpose |
 |---|---|
 | `APPSTATE` | Facebook AppState used for login |
-| `APPSTATE_FILE` | AppState bootstrap/persistence file; defaults to `appstate.json` |
-| `APPSTATE_WRITE_FILE` | Write the refreshed AppState back to `APPSTATE_FILE` (`false` by default; bootstrap only) |
-| `APPSTATE_PERSIST_FILE` | Optional encrypted local backup file; defaults to `.appstate.enc` |
-| `APPSTATE_SYNC_ENV` | Keep refreshed AppState in `process.env` (`false` by default) |
-| `APPSTATE_REQUIRE_ENCRYPTION` | Require encrypted AppState persistence (`true` in production by default) |
-| `APPSTATE_ENCRYPTION_KEY` | Encryption key required for encrypted local/Mongo AppState persistence |
+| `APPSTATE_FILE` | Optional AppState file location |
+| `APPSTATE_ENCRYPTION_KEY` | Optional encryption key for persisted AppState |
+| `FACEBOOK_EMAIL` | Optional fallback login email |
+| `FACEBOOK_PASSWORD` | Optional fallback login password |
 | `MONGO_URI` | MongoDB connection URI |
 | `MONGODB_URI` | Alternate MongoDB URI variable supported by the project |
 | `MONGO_DB_NAME` | MongoDB database name |
@@ -89,21 +87,18 @@ Common variables used by the project include:
 | `MAX_CONCURRENT_COMMANDS` | Optional command concurrency limit |
 | `DEV` | Development/runtime flag |
 
-> Do not commit `.env`, AppState data, cookies, API keys, or other secrets to a public repository.
+> Do not commit `.env`, AppState data, cookies, API keys, Facebook email/password, or other secrets to a public repository.
 
 ### Example `.env`
 
 ```env
-APPSTATE_FILE=appstate.json
-APPSTATE_WRITE_FILE=false
-APPSTATE_PERSIST_FILE=.appstate.enc
-APPSTATE_ENCRYPTION_KEY=<long-random-secret>
+APPSTATE='[...]'
 MONGO_URI=mongodb://127.0.0.1:27017
 MONGO_DB_NAME=sunkenbot
 TZ=Europe/Berlin
 ```
 
-Use a valid AppState locally. Email/password and TOTP login are intentionally disabled.
+Use your real credentials locally. The example above is intentionally incomplete.
 
 ---
 
@@ -288,25 +283,6 @@ Axios provides a consistent interface for:
 
 ---
 
-## AppState persistence and session longevity
-
-The active session is kept in the live FCA CookieJar and persisted when it actually changes:
-
-```text
-APPSTATE / appstate.json
-        │
-        ├── live CookieJar
-        ├── appstate.json (direct persistence)
-        ├── .appstate.enc (encrypted local backup)
-        └── MongoDB bot_appstate (encrypted backup when configured)
-```
-
-The bot accepts AppState only. Refreshed cookies are saved automatically when Facebook returns them; cookie expiration dates are not artificially extended.
-
-For persistent deployments, configure MongoDB together with `APPSTATE_ENCRYPTION_KEY`. Keep `appstate.json` and `.appstate.enc` out of Git.
-
----
-
 ## Session keep-alive
 
 Session management is handled by:
@@ -350,7 +326,7 @@ The database layer is located at:
 db/index.js
 ```
 
-`fca-nx` no longer depends on Sequelize or SQLite. Its user/thread layer is a bounded in-memory cache because Facebook can be queried again for this metadata; MongoDB is reserved for durable SunkenBot state such as bans and encrypted AppState. This removes a native SQLite build dependency and avoids maintaining two competing persistent databases.
+The project does not require SQLite and does not create a local SQLite database.
 
 Set the database connection with:
 
@@ -471,9 +447,11 @@ private tokens
 
 Use environment variables or another secure secret-management mechanism.
 
-### Authentication recovery
+### Automatic auth recovery
 
-The bot accepts AppState only. If Facebook reports an authentication failure such as `login_blocked`, the MQTT manager stops retry-looping and enters its configured cooldown. Restore the session by supplying a new valid AppState; password/email login is disabled.
+The bot prefers `APPSTATE`. If Facebook later reports an authentication failure such as `login_blocked`, the MQTT manager stops retry-looping and invokes the auth recovery path. When `FACEBOOK_EMAIL` and `FACEBOOK_PASSWORD` are configured, the bot attempts a fresh login, persists the new AppState, and rebuilds the bot lifecycle. If fallback credentials are unavailable or fail, the manager enters a long cooldown instead of reconnecting repeatedly.
+
+`FACEBOOK_EMAIL` and `FACEBOOK_PASSWORD` are optional secrets. They must be supplied through the environment/secrets store and never committed to the repository.
 
 ### AppState
 
@@ -561,10 +539,3 @@ Third-party services, APIs, authentication systems, and platform behavior can ch
 **SunkenBot**
 
 For issues and feature requests, use the project's issue tracker or repository discussions.
-
-
-## تسجيل الدخول وتجديد AppState
-
-يستخدم المشروع **AppState فقط** لتسجيل الدخول. مسار email/password وTOTP معطّل عمداً.
-
-عند نجاح الاتصال يتم حفظ AppState المحدّث عبر نظام التخزين المشفّر الموجود في المشروع.

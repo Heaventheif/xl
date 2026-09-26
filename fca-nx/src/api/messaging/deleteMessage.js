@@ -114,7 +114,7 @@ module.exports = function (defaultFuncs, api, ctx) {
       ctx.mqttClient.publish(
         "/ls_req",
         form,
-        { qos: 0, retain: false },
+        { qos: 1, retain: false },
         (err) => {
           if (err) {
             cleanup();

@@ -61,21 +61,6 @@ export function getFcaConfig() {
   try { file = JSON.parse(fs.readFileSync(FILE, "utf8")); }
   catch (error) { console.warn(`[FCA-CONFIG] تعذر قراءة ${FILE}: ${error.message}`); }
   cached = merge(DEFAULTS, file);
-  const envNumber = (name) => {
-    const value = Number(process.env[name]);
-    return Number.isFinite(value) && value > 0 ? value : null;
-  };
-  const envOverrides = {
-    pingIntervalMs: envNumber("MQTT_PING_MS"),
-    staleAfterMs: envNumber("MQTT_STALE_MS"),
-    watchdogIntervalMs: envNumber("MQTT_WATCHDOG_MS"),
-    reconnectBaseMs: envNumber("MQTT_RECONNECT_BASE_MS"),
-    reconnectCapMs: envNumber("MQTT_RECONNECT_CAP_MS"),
-    cooldownMs: envNumber("MQTT_COOLDOWN_MS"),
-  };
-  for (const [key, value] of Object.entries(envOverrides)) {
-    if (value !== null) cached.mqtt[key] = value;
-  }
   return cached;
 }
 

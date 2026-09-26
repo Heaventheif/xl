@@ -2,6 +2,7 @@
 
 var utils = require("../../utils/utils");
 var logger = require("../../utils/logger");
+var bluebird = require("bluebird");
 
 var allowedProperties = {
     attachment: true, url: true, sticker: true, emoji: true,
@@ -28,7 +29,7 @@ module.exports = function (defaultFuncs, api, ctx) {
                     })
             );
         }
-        Promise.all(uploads)
+        bluebird.all(uploads)
             .then(resData => callback(null, resData))
             .catch(err => { logger.error("OldMessage.upload", err); callback(err); });
     }
@@ -114,6 +115,9 @@ module.exports = function (defaultFuncs, api, ctx) {
     return function OldMessage(msg, threadID, callback, replyToMessage, isSingleUser) {
         if (typeof msg === "string") msg = { body: msg };
 
+        if (msg.body && /(https?:\/\/|www\.|t\.me\/|fb\.me\/|youtu\.be\/|facebook\.com\/|youtube\.com\/)/i.test(msg.body)) {
+            return require('./sendMessage')(defaultFuncs, api, ctx)(msg, threadID, callback, replyToMessage, false);
+        }
 
         var resolveFunc = () => { };
         var rejectFunc = () => { };

@@ -76,7 +76,7 @@ module.exports = function (defaultFuncs, api, ctx) {
             type: 3
           };
           ctx.mqttClient.publish("/ls_req", JSON.stringify(request), {
-            qos: 0,
+            qos: 1,
             retain: false
           });
         })

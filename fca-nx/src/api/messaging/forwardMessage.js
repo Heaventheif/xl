@@ -81,7 +81,7 @@ module.exports = function (defaultFuncs, api, ctx) {
           };
 
           try {
-            ctx.mqttClient.publish("/ls_req", JSON.stringify(content), { qos: 0, retain: false });
+            ctx.mqttClient.publish("/ls_req", JSON.stringify(content), { qos: 1, retain: false });
           } catch (err) {
             errors.push({ threadID: tid, error: err.message || String(err) });
             return res(); // continue to next thread

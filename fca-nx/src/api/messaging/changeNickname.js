@@ -57,7 +57,7 @@ module.exports = function (defaultFuncs, api, ctx) {
         return resolve({ success: true, response: jsonMsg.payload });
       };
       ctx.mqttClient.on("message", onResponse);
-      ctx.mqttClient.publish("/ls_req", JSON.stringify(request), { qos: 0, retain: false }, (err) => {
+      ctx.mqttClient.publish("/ls_req", JSON.stringify(request), { qos: 1, retain: false }, (err) => {
         if (err) {
           ctx.mqttClient.removeListener("message", onResponse);
           log.error("changeNicknameMqtt", err);

@@ -104,7 +104,7 @@ module.exports = function (defaultFuncs, api, ctx) {
       "request_id": reqID,
       "type": 3
     });
-    ctx.mqttClient.publish("/ls_req", form, { qos: 0, retain: false }, (err) => {
+    ctx.mqttClient.publish("/ls_req", form, { qos: 1, retain: false }, (err) => {
       if (err) return done(err);
       done(null, { success: true });
     });

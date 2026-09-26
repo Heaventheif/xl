@@ -4,7 +4,15 @@ const logger = require("../func/logger");
 const defaultConfig = {
   autoUpdate: true,
   mqtt: { enabled: true, reconnectInterval: 3600 },
-  autoLogin: false,
+  autoLogin: true,
+  // SECURITY: intentionally no default value here. Sending Facebook
+  // credentials to a third-party server should be an explicit,
+  // operator-chosen opt-in (see module/loginHelper.js#loginViaAPI), never a
+  // silent default. Set this in fca-config.json only if you trust the
+  // server you're pointing it at.
+  apiServer: "",
+  apiKey: "",
+  credentials: { email: "", password: "", twofactor: "" },
   antiGetInfo: {
     AntiGetThreadInfo: false,
     AntiGetUserInfo: false
