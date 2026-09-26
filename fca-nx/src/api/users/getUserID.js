@@ -2,6 +2,7 @@
 
 const log = require("../../../func/logAdapter");
 const { formatID } = require("../../utils/format");
+const { parseAndCheckLogin } = require("../../utils/utils");
 function formatData(data) {
   return {
     userID: formatID(data.uid.toString()),

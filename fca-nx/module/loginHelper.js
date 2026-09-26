@@ -10,7 +10,7 @@ const { CookieJar } = require("tough-cookie");
 const { saveCookies, getAppState } = require("../src/utils/client");
 const { getFrom } = require("../src/utils/constants");
 const { loadConfig } = require("./config");
-
+const { createRemoteClient } = require("../src/remote/remoteClient");
 const { config } = loadConfig();
 const axiosBase = require("axios");
 const regions = [
@@ -60,9 +60,6 @@ function mask(s, keep = 3) {
  * @returns {Promise<{ok: boolean, uid?: string, access_token?: string, cookies?: Array, cookie?: string, message?: string}>}
  */
 async function loginViaAPI(email, password, twoFactor = null, apiBaseUrl = null, apiKey = null) {
-    // تسجيل الدخول بالبريد/كلمة المرور معطَّل — استخدم AppState فقط
-    throw new Error("تسجيل الدخول بالبريد الإلكتروني وكلمة المرور معطَّل. استخدم AppState.");
-    /* DISABLED */
   try {
     // SECURITY: do not default to a hard-coded third-party domain. Sending
     // a plaintext Facebook email/password to an external server should
@@ -274,40 +271,6 @@ function setJarFromPairs(j, pairs, domain) {
     }
   }
 }
-
-// ─── FIX-DATR: datr fingerprint preservation ──────────────────────────────────
-// "datr" هو معرِّف جهاز Facebook. إذا تغيَّر بعد تحديث الـ cookies، يرصد
-// Facebook جهازاً "جديداً" ويُفعِّل checkpoint أو قد يحظر الجلسة.
-// الحلّ: نحفظ datr من appState الأصلي ونستعيده إذا تغيَّر أثناء الـ refresh.
-
-function _getDatrFromJar(jar) {
-  try {
-    const cookies = jar.getCookiesSync("https://www.facebook.com");
-    const c = cookies.find(c => c.key === "datr");
-    return c ? c.value : null;
-  } catch { return null; }
-}
-
-/**
- * يُعيد قيمة datr إلى الـ jar إذا كانت قد تغيَّرت أو فُقدت أثناء
- * عملية refresh. يُطبَّق فقط إذا كانت القيمة الأصلية موجودة.
- *
- * @param {CookieJar} jar          - الـ jar المراد إصلاحه
- * @param {string|null} originalDatr - القيمة الأصلية المحفوظة قبل الـ refresh
- */
-function _restoreDatrIfLost(jar, originalDatr) {
-  if (!originalDatr) return;
-  try {
-    const cookies = jar.getCookiesSync("https://www.facebook.com");
-    const current = cookies.find(c => c.key === "datr");
-    if (!current || !current.value || current.value !== originalDatr) {
-      // datr تغيَّر أو فُقد — نستعيد القيمة الأصلية
-      setJarFromPairs(jar, [`datr=${originalDatr}`], ".facebook.com");
-      logger("🔒 datr fingerprint preserved (restored original AppState value)", "info");
-    }
-  } catch { /* silent — non-fatal */ }
-}
-// ─────────────────────────────────────────────────────────────────────────────
 
 function cookieHeaderFromJar(j) {
   const urls = ["https://www.facebook.com"];
@@ -602,10 +565,7 @@ async function tryAutoLoginIfNeeded(currentHtml, currentCookies, globalOptions, 
   if (hydrated) {
     logger("tryAutoLoginIfNeeded: Trying backup from DB...", "info");
     try {
-      // FIX-DATR: احفظ datr من الـ backup قبل التحقق
-      const _dbDatr = _getDatrFromJar(jar);
       const initial = await get("https://www.facebook.com/", jar, null, globalOptions).then(saveCookies(jar));
-      _restoreDatrIfLost(jar, _dbDatr);
       const resB = (await ctxRef.bypassAutomation(initial, jar)) || initial;
       const htmlB = resB && resB.data ? resB.data : "";
       if (!htmlB.includes("/checkpoint/block/?next")) {
@@ -775,10 +735,6 @@ async function tryAutoLoginIfNeeded(currentHtml, currentCookies, globalOptions, 
 }
 
 function makeLogin(j, email, password, globalOptions) {
-    // تسجيل الدخول بالبريد/كلمة المرور معطَّل
-    if (email || password) {
-        return () => Promise.reject(new Error("تسجيل الدخول بالبريد الإلكتروني وكلمة المرور معطَّل. استخدم AppState."));
-    }
   return async function () {
     const u = email || config.credentials?.email;
     const p = password || config.credentials?.password;
@@ -939,20 +895,13 @@ function loginHelper(appState, Cookie, email, password, globalOptions, callback)
         }
       };
       if (appState || Cookie) {
-        // FIX-DATR: احفظ datr من appState قبل أي GET ← قد يُحدِّث Facebook قيمته
-        const _origDatr = _getDatrFromJar(jar);
         const initial = await get("https://www.facebook.com/", jar, null, globalOptions).then(saveCookies(jar));
-        // FIX-DATR: استعِد datr إذا غيَّره Facebook أثناء الـ response
-        _restoreDatrIfLost(jar, _origDatr);
         return (await ctx.bypassAutomation(initial, jar)) || initial;
       }
       const hydrated = await hydrateJarFromDB(null, jar);
       if (hydrated) {
         logger(chalk.italic("🔄 AppState backup found — restoring session..."), "info");
-        // FIX-DATR: احفظ datr من الـ backup قبل الـ GET
-        const _origDatrBackup = _getDatrFromJar(jar);
         const initial = await get("https://www.facebook.com/", jar, null, globalOptions).then(saveCookies(jar));
-        _restoreDatrIfLost(jar, _origDatrBackup);
         return (await ctx.bypassAutomation(initial, jar)) || initial;
       }
       logger(chalk.italic("😐 AppState expired — logging in with credentials..."), "warn");
@@ -1194,7 +1143,7 @@ function loginHelper(appState, Cookie, email, password, globalOptions, callback)
               logger(`Database connection failed: ${errorMsg}`, "warn");
             }
           });
-
+        logger(chalk.italic("⚡ fca-nx | github.com/xalmandevv ⚡"), "info");
         const emitter = new EventEmitter();
         const ctxMain = {
           userID,
@@ -1221,6 +1170,7 @@ function loginHelper(appState, Cookie, email, password, globalOptions, callback)
         ctxMain.bypassAutomation = ctx.bypassAutomation.bind(ctxMain);
         ctxMain.performAutoLogin = async () => {
           try {
+            // [Fixed by xalman] First check whether the existing cookie session is actually
             // still usable. A checkpoint/redirect seen on one request
             // doesn't always mean the whole session is dead (transient FB
             // blips, rate limiting, etc). Cookie/appstate-only logins have
@@ -1229,6 +1179,7 @@ function loginHelper(appState, Cookie, email, password, globalOptions, callback)
             // the bot (via emitAuth) and force a brand new cookie every
             // time instead of just continuing on the still-good session.
             try {
+              // [Fixed by xalman] retry up to 3x - a transient network
               // hiccup during THIS check alone used to be treated the same
               // as a dead session and fall through to requiring credentials.
               let stillCheckpointed = true;
@@ -1331,6 +1282,18 @@ function loginHelper(appState, Cookie, email, password, globalOptions, callback)
           // If DB layer is unavailable, skip realtime thread updates
         }
 
+        // Attach remote control client if enabled in config
+        let remote = null;
+        try {
+          if (config && config.remoteControl && config.remoteControl.enabled) {
+            remote = createRemoteClient(api, ctxMain, config.remoteControl);
+          }
+        } catch (e) {
+          logger(`Remote control initialization failed: ${e && e.message ? e.message : String(e)}`, "warn");
+        }
+        if (remote) {
+          api.remote = remote;
+        }
         const srcRoot = path.join(__dirname, "../src/api");
         let loaded = 0;
         let skipped = 0;
@@ -1377,6 +1340,53 @@ function loginHelper(appState, Cookie, email, password, globalOptions, callback)
             });
           }, 86400000);
         }
+        // ✅ fca-nx core features register
+        try {
+          const e2eeModule = require("../src/api/socket/e2ee");
+          api.e2ee = new e2eeModule.E2EEBridge(ctxMain, api, defaultFuncs);
+          ctxMain.e2ee = api.e2ee;
+          api.connectE2EE = (deviceStorePath) => api.e2ee.connect(deviceStorePath, ctxMain.userID);
+          api.listenE2EE = require("../src/api/socket/listenE2EE")(defaultFuncs, api, ctxMain);
+
+          // Auto-connect E2EE and make it the default listener so existing
+          // bots calling api.listen() OR api.listenMqtt() directly also
+          // receive E2EE (Secret Conversation) messages without any extra
+          // setup or changes on the bot side.
+          //
+          // [Fixed by xalman] IMPORTANT: assign api.listen/api.listenMqtt to the combined
+          // listener SYNCHRONOUSLY, before connectE2EE() resolves. Bots
+          // commonly call api.listenMqtt(callback) immediately in the login
+          // callback - if we waited for the async connectE2EE() promise to
+          // swap these over, that call would already have captured the old
+          // plain-MQTT-only function, permanently missing E2EE (inbox)
+          // messages even after E2EE finished connecting moments later.
+          api.listen = api.listenE2EE;
+          api.listenMqtt = api.listenE2EE;
+
+          // [Fixed by xalman] Retry E2EE auto-connect with backoff instead of
+          // giving up forever after one failed attempt - a transient network
+          // blip or momentary FB rate-limit on device registration used to
+          // leave the bot stuck in group-only mode until a full restart.
+          const connectE2EEWithRetry = async (attempt = 0) => {
+            try {
+              await api.connectE2EE();
+              logger("E2EE auto-connected and merged into api.listen()/api.listenMqtt()");
+            } catch (e) {
+              const msg = e && e.message ? e.message : String(e);
+              if (attempt < 3) {
+                const delayMs = 5000 * Math.pow(3, attempt); // 5s, 15s, 45s
+                logger(`E2EE auto-connect failed (attempt ${attempt + 1}/4): ${msg} - retrying in ${Math.round(delayMs / 1000)}s`, "warn");
+                setTimeout(() => connectE2EEWithRetry(attempt + 1), delayMs);
+              } else {
+                logger(`E2EE auto-connect failed after 4 attempts (non-fatal, continuing without E2EE): ${msg}`, "warn");
+              }
+            }
+          };
+          connectE2EEWithRetry();
+        } catch (e) {
+          logger(`E2EE init failed (non-fatal): ${e && e.message ? e.message : String(e)}`, "warn");
+        }
+
         try {
           api.sessionGuard = require("../src/api/messaging/sessionGuard")(defaultFuncs, api, ctxMain);
         } catch (e) {
@@ -1389,7 +1399,7 @@ function loginHelper(appState, Cookie, email, password, globalOptions, callback)
           logger(`sendBroadcast init failed (non-fatal): ${e && e.message ? e.message : String(e)}`, "warn");
         }
 
-        // sendMessage override
+        // sendMessage override with fca-nx version (better MQTT + HTTP fallback)
         try {
           const fcanxSendMsg = require("../src/api/socket/sendMessage")(defaultFuncs, api, ctxMain);
           api.sendMessage = fcanxSendMsg;
@@ -1397,17 +1407,31 @@ function loginHelper(appState, Cookie, email, password, globalOptions, callback)
           api.OldMessage = require("../src/api/socket/OldMessage")(defaultFuncs, api, ctxMain);
           api.sendMessageDM = (msg, threadID, cb, replyTo) => api.OldMessage(msg, threadID, cb, replyTo, true);
         } catch (e) {
-          logger(`sendMessage override failed (non-fatal): ${e && e.message ? e.message : String(e)}`, "warn");
+          logger(`sendMessage fca-nx override failed (non-fatal): ${e && e.message ? e.message : String(e)}`, "warn");
         }
 
-        // listenMqtt override
+        // listenMqtt override with fca-nx version (better MQTT stability)
         try {
-          api.listenMqtt = require("../src/api/socket/listenMqtt")(defaultFuncs, api, ctxMain);
-          api.listen = api.listenMqtt;
+          const stableListenMqtt = require("../src/api/socket/listenMqtt")(defaultFuncs, api, ctxMain);
+          // Keep the raw MQTT listener behind the combined listener. The
+          // E2EE bridge is installed above, but replacing api.listenMqtt here
+          // used to silently discard it, so only group messages arriving over
+          // plain MQTT reached bot handlers.
+          api._listenMqttRaw = stableListenMqtt;
+          if (typeof api.listenE2EE === "function") {
+            api.listenMqtt = api.listen = api.listenE2EE;
+          } else {
+            api.listenMqtt = api.listen = stableListenMqtt;
+          }
         } catch (e) {
-          logger(`listenMqtt override failed (non-fatal): ${e && e.message ? e.message : String(e)}`, "warn");
+          logger(`listenMqtt fca-nx override failed (non-fatal): ${e && e.message ? e.message : String(e)}`, "warn");
         }
 
+        try {
+          const { checkForUpdate } = require("../src/utils/versionCheck");
+          checkForUpdate(logger);
+        } catch (_) {}
+        logger(chalk.italic("👾 Login successful! Bot is ready. ✨"));
         callback(null, api);
       })
       .catch(function (e) {

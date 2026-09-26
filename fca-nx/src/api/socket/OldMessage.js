@@ -2,11 +2,15 @@
 
 var utils = require("../../utils/utils");
 var logger = require("../../utils/logger");
-// FIX-BLUEBIRD: استخدام Promise.all المدمج في Node.js بدلاً من bluebird
+var bluebird = require("bluebird");
+var { getTextEffectId } = require("../../utils/textEffects");
 
 var allowedProperties = {
     attachment: true, url: true, sticker: true, emoji: true,
-    emojiSize: true, body: true, mentions: true, location: true,
+    emojiSize: true, body: true, mentions: true, location: true, text_effect_ids: true,
+    textEffect: true, text_effect: true, text_effect_id: true, textEffectId: true,
+    textEffectID: true, effect: true, effect_id: true, effectID: true,
+    text_effect_name: true, effectName: true, effect_name: true,
 };
 
 module.exports = function (defaultFuncs, api, ctx) {
@@ -29,7 +33,7 @@ module.exports = function (defaultFuncs, api, ctx) {
                     })
             );
         }
-        Promise.all(uploads)
+        bluebird.all(uploads)
             .then(resData => callback(null, resData))
             .catch(err => { logger.error("OldMessage.upload", err); callback(err); });
     }
@@ -134,6 +138,8 @@ module.exports = function (defaultFuncs, api, ctx) {
 
         var form = {};
         if (msg.body) form.body = msg.body;
+        var textEffectId = getTextEffectId(msg);
+        if (textEffectId) form.text_effect_id = textEffectId;
 
         if (msg.mentions && Array.isArray(msg.mentions)) {
             form.body = msg.body || "";

@@ -1,6 +1,7 @@
 "use strict";
 
 const { generateOfflineThreadingID } = require("../../utils/format");
+const { parseAndCheckLogin } = require("../../utils/utils");
 const log = require("../../../func/logAdapter");
 
 module.exports = function (defaultFuncs, api, ctx) {

@@ -1,6 +1,5 @@
 "use strict";
 
-const log = require("../../../func/logAdapter");
 const { getFrom } = require("../../utils/constants");
 const { get } = require("../../utils/request")
 const { getType } = require("../../utils/format");
@@ -12,7 +11,7 @@ module.exports = function (defaultFuncs, api, ctx) {
     }
     if (!obj) obj = {};
     if (getType(obj) !== "Object") {
-      throw new CustomError("The first parameter must be an object or a callback function");
+      throw new TypeError("The first parameter must be an object or a callback function");
     }
     let resolveFunc, rejectFunc;
     const returnPromise = new Promise((resolve, reject) => {

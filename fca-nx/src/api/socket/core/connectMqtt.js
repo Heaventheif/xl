@@ -1,20 +1,4 @@
 "use strict";
-
-// FIX-KEEPALIVE: pingIntervalMs قابل للتخصيص عبر FCA_MQTT_KEEPALIVE مع الحفاظ على الجيتر العشوائي.
-// بدون env var يستخدم 45–75 ثانية عشوائياً لتجنب البصمة الثابتة.
-const _envMqttKeepAlive = () => {
-  const v = parseInt(process.env.FCA_MQTT_KEEPALIVE, 10);
-  if (!isNaN(v) && v > 0) return v;
-  return null; // fall through to random jitter
-};
-const _randomKeepAlive = () => {
-  const fixed = _envMqttKeepAlive();
-  if (fixed !== null) return fixed;
-  return 45 + Math.floor(Math.random() * 30);
-};
-// Non-deterministic forceCycle interval (±15%) to avoid periodic reconnect fingerprint
-const _jitteredCycle = (ms) => Math.round(ms * (0.85 + Math.random() * 0.3));
-
 /**
  * MQTT/WebSocket listener for Facebook Messenger real-time events.
  * Connects to edge-chat.facebook.com, subscribes to topics, parses deltas and typing/presence.
@@ -26,7 +10,7 @@ const DEFAULT_RECONNECT_DELAY_MS = 2000;
 const MAX_RECONNECT_DELAY_MS = 60000;
 const MAX_RECONNECT_ATTEMPTS = 10; // cap consecutive network-failure reconnects; does not apply to confirmed auth failures (those never reconnect)
 const MAX_RECONNECT_COOLDOWN_MS = 10 * 60 * 1000; // after exhausting fast retries, wait this long before trying again (never give up permanently)
-const T_MS_WAIT_TIMEOUT_MS = 15000;
+const T_MS_WAIT_TIMEOUT_MS = 5000;
 
 // Exponential backoff with jitter, based on how many *consecutive* reconnect
 // attempts have happened for this session (reset to 0 on a successful
@@ -45,24 +29,12 @@ module.exports = function createListenMqtt(deps) {
   } = deps;
 
   return function listenMqtt(defaultFuncs, api, ctx, globalCallback) {
-    const generation = (ctx._mqttGeneration || 0) + 1;
-    ctx._mqttGeneration = generation;
-    const isCurrent = () => ctx._mqttGeneration === generation;
 
     function scheduleReconnect(delayMs) {
       const base = (ctx._mqttOpt && ctx._mqttOpt.reconnectDelayMs) || DEFAULT_RECONNECT_DELAY_MS;
       if (ctx._reconnectTimer) {
         logger("mqtt reconnect already scheduled", "warn");
         return; // debounce
-      }
-      // FIX-ALERT: تنبيه المطوِّر عند تجاوز 20 خطأ متراكم — قد يكون Facebook غيَّر endpoint
-      ctx._consecutiveErrors = (ctx._consecutiveErrors || 0) + 1;
-      if (ctx._consecutiveErrors > 20) {
-        logger(
-          `[ALERT] تجاوز عدد الأخطاء المتتالية في MQTT الحدَّ ${ctx._consecutiveErrors}/20. ` +
-          "قد يكون Facebook غيَّر endpoint أو format. راجع الـ logs ويَجدُر تحديث المكتبة.",
-          "error"
-        );
       }
       if (ctx._ending) {
         // Covers confirmed logout/checkpoint/blocked-login/invalid-session:
@@ -72,28 +44,28 @@ module.exports = function createListenMqtt(deps) {
         return;
       }
       ctx._reconnectAttempts = (ctx._reconnectAttempts || 0) + 1;
-      const maxAttempts = Number(ctx._mqttOpt?.maxReconnectAttempts) || MAX_RECONNECT_ATTEMPTS;
-      if (ctx._reconnectAttempts > maxAttempts) {
+      if (ctx._reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+        // [Fixed by xalman] Don't give up forever - a run of consecutive failures is usually a
         // temporary outage (hosting network blip, FB-side hiccup), not a
         // dead account. Back off to a long, FB-friendly cooldown and reset
         // the counter so normal exponential backoff resumes after that.
-        const cooldownMs = Number(ctx._mqttOpt?.reconnectCooldownMs) || MAX_RECONNECT_COOLDOWN_MS;
-        logger(`mqtt reconnect attempts exceeded (${maxAttempts}); backing off ${Math.round(cooldownMs / 60000)}min before trying again (not giving up)`, "error");
+        const cooldownMs = MAX_RECONNECT_COOLDOWN_MS;
+        logger(`mqtt reconnect attempts exceeded (${MAX_RECONNECT_ATTEMPTS}); backing off ${Math.round(cooldownMs / 60000)}min before trying again (not giving up)`, "error");
         globalCallback({ type: "stop_listen", error: "Max reconnect attempts exceeded - will retry after cooldown" }, null);
         ctx._reconnectAttempts = 0;
         ctx._reconnectTimer = setTimeout(() => {
           ctx._reconnectTimer = null;
-          if (isCurrent() && !ctx._ending) {
+          if (!ctx._ending) {
             listenMqtt(defaultFuncs, api, ctx, globalCallback);
           }
         }, cooldownMs);
         return;
       }
       const ms = typeof delayMs === "number" ? delayMs : computeBackoff(ctx, base);
-      logger(`mqtt will reconnect in ${ms}ms (attempt ${ctx._reconnectAttempts}/${maxAttempts})`, "warn");
+      logger(`mqtt will reconnect in ${ms}ms (attempt ${ctx._reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`, "warn");
       ctx._reconnectTimer = setTimeout(() => {
         ctx._reconnectTimer = null;
-        if (isCurrent() && !ctx._ending) {
+        if (!ctx._ending) {
           listenMqtt(defaultFuncs, api, ctx, globalCallback);
         }
       }, ms);
@@ -136,11 +108,8 @@ module.exports = function createListenMqtt(deps) {
 
     const options = {
       clientId: "mqttwsclient",
-      // FIX-PROTOCOL: تحديث MQTT protocolVersion من 3 إلى 4 (MQTT v3.1.1)
-      // v3 = MQIsdp (بروتوكول قديم MQTT 3.1)، v4 = MQTT 3.1.1 المعتمد من FB.
-      // "MQIsdp" مع v4 هو ما ترسله عملاء Messenger الحقيقيون.
       protocolId: "MQIsdp",
-      protocolVersion: 4,
+      protocolVersion: 3,
       username: JSON.stringify(username),
       clean: true,
       wsOptions: {
@@ -170,7 +139,7 @@ module.exports = function createListenMqtt(deps) {
       keepalive: 30,
       reschedulePings: true,
       reconnectPeriod: 0,
-      connectTimeout: Number(ctx._mqttOpt?.connectTimeoutMs) || 15000
+      connectTimeout: 5000
     };
     if (ctx.globalOptions.proxy !== undefined) {
       const agent = new HttpsProxyAgent(ctx.globalOptions.proxy);
@@ -184,7 +153,6 @@ module.exports = function createListenMqtt(deps) {
     const mqttClient = ctx.mqttClient;
 
     mqttClient.on("error", function (err) {
-      if (!isCurrent()) return;
       const msg = String(err && err.message ? err.message : err || "");
       if ((ctx._ending || ctx._cycling) && /No subscription existed|client disconnecting/i.test(msg)) {
         logger(`mqtt expected during shutdown: ${msg}`, "info");
@@ -192,8 +160,7 @@ module.exports = function createListenMqtt(deps) {
       }
 
       if (/Invalid header flag bits|must be 0x0 for puback/i.test(msg)) {
-        // هذا سلوك فيسبوك غير المعياري — يُتجاهل بصمت دون تسجيل
-        // (كان يُسبّب ضجيجاً في الـ logs عند كل رسالة)
+        logger(`mqtt puback ignored: ${msg}`, "warn");
         return;
       }
 
@@ -203,10 +170,20 @@ module.exports = function createListenMqtt(deps) {
             mqttClient.end(true);
           }
         } catch (_) { }
-        return emitAuth(ctx, api, globalCallback,
-          /blocked/i.test(msg) ? "login_blocked" : "not_logged_in",
-          msg
-        );
+        if (/blocked/i.test(msg)) {
+          return emitAuth(ctx, api, globalCallback, "login_blocked", msg);
+        }
+
+        // Auth responses can race with the shared cookie refresh triggered by
+        // another request. Treat a plain 401/403/"Not logged in" MQTT error as
+        // recoverable instead of emitting account_inactive and permanently
+        // setting ctx._ending. The close handler/scheduler will establish a
+        // fresh MQTT connection with the refreshed session.
+        logger(`mqtt transient auth error; reconnecting without logging out: ${msg}`, "warn");
+        if (!ctx._ending && ctx.globalOptions.autoReconnect) {
+          scheduleReconnect();
+        }
+        return;
       }
       logger(`mqtt error: ${msg}`, "error");
       try {
@@ -228,38 +205,18 @@ module.exports = function createListenMqtt(deps) {
     });
 
     mqttClient.on("connect", function () {
-      if (!isCurrent()) return;
+      if (process.env.OnStatus === undefined) {
+        logger("fca-unofficial", "info");
+        process.env.OnStatus = true;
+      }
       ctx._cycling = false;
       // A successful connect means the session/identity/network are fine -
       // reset the backoff counter so a later transient failure starts a
       // fresh backoff sequence instead of inheriting a long delay from an
       // unrelated earlier outage.
-      const wasReconnect = (ctx._reconnectAttempts || 0) > 0; // FIX-DTSG: هل هذا reconnect وليس first connect؟
       ctx._reconnectAttempts = 0;
-      ctx._consecutiveErrors = 0; // FIX-ALERT: reset عداد الأخطاء المتراكمة عند الاتصال الناجح
-      if (ctx._rTimeout) {
-        clearTimeout(ctx._rTimeout);
-        ctx._rTimeout = null;
-      }
 
       topics.forEach(t => mqttClient.subscribe(t));
-
-      // FIX-DTSG: تحديث fb_dtsg بعد كل reconnect ناجح (ليس first connect)
-      // fb_dtsg token ينتهي صلاحيته ويحتاج تحديث بعد انقطاع الجلسة.
-      // تأخير 3 ثوانٍ لإتاحة الوقت لاستقرار الاتصال أولاً.
-      if (wasReconnect && api && typeof api.refreshFb_dtsg === "function") {
-        setTimeout(function () {
-          if (!isCurrent() || ctx._ending) return;
-          api.refreshFb_dtsg().then(function () {
-            logger("✅ fb_dtsg refreshed after MQTT reconnect", "info");
-          }).catch(function (e) {
-            logger(
-              `fb_dtsg refresh after MQTT reconnect failed (non-fatal): ${e && e.message ? e.message : String(e)}`,
-              "warn"
-            );
-          });
-        }, 3000);
-      }
 
 
       const queue = {
@@ -272,7 +229,6 @@ module.exports = function createListenMqtt(deps) {
       mqttClient.publish("/foreground_state", JSON.stringify({ foreground: chatOn }), { qos: 1 });
       mqttClient.publish("/set_client_settings", JSON.stringify({ make_user_available_when_in_foreground: true }), { qos: 1 });
       let rTimeout = setTimeout(function () {
-        if (!isCurrent()) return;
         rTimeout = null;
         if (ctx._ending) {
           logger("mqtt t_ms timeout skipped - ending", "warn");
@@ -285,7 +241,7 @@ module.exports = function createListenMqtt(deps) {
           }
         } catch (_) { }
         scheduleReconnect();
-      }, Number(ctx._mqttOpt?.tmsWaitTimeoutMs) || T_MS_WAIT_TIMEOUT_MS);
+      }, T_MS_WAIT_TIMEOUT_MS);
 
       // Store timeout reference for cleanup
       ctx._rTimeout = rTimeout;
@@ -304,7 +260,7 @@ module.exports = function createListenMqtt(deps) {
     });
 
     mqttClient.on("message", function (topic, message) {
-      if (!isCurrent() || ctx._ending) return; // Ignore stale/ending connections
+      if (ctx._ending) return; // Ignore messages if ending
       try {
         let jsonMessage = Buffer.isBuffer(message) ? Buffer.from(message).toString() : message;
         try {
@@ -363,11 +319,6 @@ module.exports = function createListenMqtt(deps) {
     });
 
     mqttClient.on("close", function () {
-      if (!isCurrent()) return;
-      if (ctx._rTimeout) {
-        clearTimeout(ctx._rTimeout);
-        ctx._rTimeout = null;
-      }
       if (ctx._ending || ctx._cycling) {
         logger("mqtt close expected", "info");
         return;
@@ -379,7 +330,6 @@ module.exports = function createListenMqtt(deps) {
     });
 
     mqttClient.on("disconnect", () => {
-      if (!isCurrent()) return;
       if (ctx._ending || ctx._cycling) {
         logger("mqtt disconnect expected", "info");
         return;

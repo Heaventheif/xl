@@ -1,3 +1,11 @@
 "use strict";
-// E2EE removed — this vendor stub is intentionally empty.
-module.exports = {};
+
+module.exports = function fcaNXAdapter(options, fcaOptions, callback) {
+  if (global._fcanxE2EEAdapter) {
+    return callback(null, global._fcanxE2EEAdapter);
+  }
+
+  const error = new Error("FCA-NX E2EE adapter is not initialized");
+  if (typeof callback === "function") return callback(error);
+  throw error;
+};

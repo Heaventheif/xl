@@ -13,6 +13,7 @@ module.exports = login;
 module.exports.login = login;
 module.exports.default = login;
 
+// New features from dongdev
 module.exports.createFcaClient = createFcaClient;
 module.exports.MessengerBot = MessengerBot;
 module.exports.createMessengerBot = createMessengerBot;

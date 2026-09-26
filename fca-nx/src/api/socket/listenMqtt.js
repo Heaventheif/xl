@@ -4,7 +4,6 @@
  */
 
 "use strict";
-const MqttHealthManager = require("./core/mqttHealthManager");
 
 const mqtt = require("mqtt");
 const WebSocket = require("ws");
@@ -29,8 +28,6 @@ const MAX_MQTT_RECONNECT_COOLDOWN_MS = 10 * 60 * 1000; // long cooldown after ex
 const MAX_MQTT_RECONNECT_ATTEMPTS = 10;
 const HEARTBEAT_INTERVAL_MS = 30000;
 const HEARTBEAT_TIMEOUT_MS = 10000;
-const CONNECT_TIMEOUT_MS = 15000;
-const TMS_WAIT_TIMEOUT_MS = 15000;
 
 const parseDelta = createParseDelta({ parseAndCheckLogin });
 const emitAuth = createEmitAuth({ logger });
@@ -54,9 +51,6 @@ const MQTT_DEFAULTS = {
     autoReconnect: true,
     reconnectAfterStop: false,
     maxReconnectAttempts: MAX_MQTT_RECONNECT_ATTEMPTS,
-    reconnectCooldownMs: MAX_MQTT_RECONNECT_COOLDOWN_MS,
-    connectTimeoutMs: CONNECT_TIMEOUT_MS,
-    tmsWaitTimeoutMs: TMS_WAIT_TIMEOUT_MS,
     heartbeatInterval: HEARTBEAT_INTERVAL_MS,
     heartbeatTimeout: HEARTBEAT_TIMEOUT_MS
 };
@@ -88,12 +82,17 @@ module.exports = function (defaultFuncs, api, ctx, opts) {
         function postSafe(...args) {
             return rawPost(...args).catch(err => {
                 const msg = (err && err.error) || (err && err.message) || String(err || "");
-                if (/Not logged in|blocked the login|Checkpoint/i.test(msg)) {
+                // A single request can briefly see an expired web session while
+                // another request is refreshing the shared cookie jar. Do not
+                // tear down the live MQTT session for that recoverable case;
+                // the shared auto-login promise handles the HTTP request and
+                // MQTT reconnects itself if the socket also needs refreshing.
+                if (/blocked the login|Checkpoint/i.test(msg)) {
                     emitAuth(
                         ctx,
                         api,
                         globalCallback,
-                        /blocked|checkpoint/i.test(msg) ? "login_blocked" : "not_logged_in",
+                        /blocked|checkpoint/i.test(msg) ? "login_blocked" : "auth_error",
                         msg
                     );
                 }
@@ -147,20 +146,6 @@ module.exports = function (defaultFuncs, api, ctx, opts) {
                 ctx._cycling = false;
                 reconnectAttempts = 0;
                 isReconnecting = false;
-                // FIX: after getSeqID completes, connectMqtt.js has already set up
-                // its own close/error handlers internally — we must NOT call the full
-                // attachClientListeners() here (that would remove those handlers and
-                // cause the puback/double-connection bug seen in the logs).
-                // We only need "packetreceive" to keep lastPongTime fresh so the
-                // heartbeat does not call forceCycle() every ~60s due to a stale timestamp.
-                if (ctx.mqttClient) {
-                    ctx.mqttClient.removeAllListeners("packetreceive");
-                    ctx.mqttClient.on("packetreceive", (packet) => {
-                        lastPongTime = Date.now();
-                        if (packet && packet.cmd === "pingresp")
-                            logger("mqtt pong received", "debug");
-                    });
-                }
                 startHeartbeat();
             })
             .catch(e => {
@@ -175,7 +160,7 @@ module.exports = function (defaultFuncs, api, ctx, opts) {
                     const maxAttempts = conf.maxReconnectAttempts || MAX_MQTT_RECONNECT_ATTEMPTS;
 
                     if (reconnectAttempts > maxAttempts) {
-                        const cooldownMs = conf.reconnectCooldownMs || MAX_MQTT_RECONNECT_COOLDOWN_MS;
+                        const cooldownMs = MAX_MQTT_RECONNECT_COOLDOWN_MS;
                         logger(`mqtt getSeqID: max reconnect attempts exceeded, backing off ${Math.round(cooldownMs / 60000)}min before trying again (not giving up)`, "error");
                         globalCallback({ type: "stop_listen", error: "Max reconnect attempts exceeded - will retry after cooldown" }, null);
                         reconnectAttempts = 0;
@@ -426,6 +411,7 @@ module.exports = function (defaultFuncs, api, ctx, opts) {
         ctx.mqttClient.removeAllListeners("close");
         ctx.mqttClient.removeAllListeners("error");
 
+        // [Fixed by xalman] mqtt.js does NOT emit a "pong" event - that was never firing,
         // so lastPongTime was never refreshed and the heartbeat below kept
         // force-reconnecting the account roughly every minute (this is what
         // looked like periodic auto logout). The library's own keepalive
@@ -440,8 +426,26 @@ module.exports = function (defaultFuncs, api, ctx, opts) {
             }
         });
 
-        // close/error are owned by connectMqtt.js. Registering another pair here
-        // caused duplicate reconnect scheduling and could race with getSeqID.
+        ctx.mqttClient.once("close", () => {
+            logger("mqtt connection closed", "warn");
+            stopHeartbeat();
+            if (!ctx._ending && ctx.globalOptions.autoReconnect !== false) {
+                if (!isReconnecting) {
+                    isReconnecting = true;
+                    delayedReconnect();
+                }
+            }
+        });
+
+        ctx.mqttClient.once("error", (err) => {
+            logger(`mqtt error: ${err.message}`, "error");
+            if (!ctx._ending && ctx.globalOptions.autoReconnect !== false) {
+                if (!isReconnecting) {
+                    isReconnecting = true;
+                    forceCycle();
+                }
+            }
+        });
     }
 
     return function (callback) {

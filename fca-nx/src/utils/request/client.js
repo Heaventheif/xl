@@ -1,16 +1,5 @@
 "use strict";
 
-// Connection pool — TLS session ticket reuse reduces "new client" signal
-// Source: fca-unofficial analysis + hardening guide
-const _https = require("https");
-const _http  = require("http");
-const _sharedHttpsAgent = new _https.Agent({
-  keepAlive: true, keepAliveMsecs: 30_000,
-  maxSockets: 4, maxFreeSockets: 2, timeout: 30_000
-});
-const _sharedHttpAgent = new _http.Agent({ keepAlive: true, maxSockets: 4 });
-
-
 const axios = require("axios");
 const { CookieJar } = require("tough-cookie");
 const { wrapper } = require("axios-cookiejar-support");

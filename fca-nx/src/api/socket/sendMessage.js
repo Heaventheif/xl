@@ -2,11 +2,15 @@
 
 var utils = require("../../utils/utils");
 var logger = require("../../utils/logger");
+var { getTextEffectId, getTextEffectIds } = require("../../utils/textEffects");
 
 var ALLOWED = {
     attachment: true, url: true, sticker: true, emoji: true,
     emojiSize: true, body: true, mentions: true, location: true,
-    replyToMessage: true, forwardAttachmentIds: true
+    replyToMessage: true, forwardAttachmentIds: true, text_effect_ids: true,
+    textEffect: true, text_effect: true, text_effect_id: true,
+    textEffectId: true, textEffectID: true, effect: true, effect_id: true,
+    effectID: true, text_effect_name: true, effectName: true, effect_name: true
 };
 
 var EMOJI_SIZES = { small: 1, medium: 2, large: 3 };
@@ -69,26 +73,9 @@ function extractIdsFromPayload(payload) {
 function publishLsRequestWithAck(mqttClient, content, requestId, timeout) {
     timeout = timeout || 15000;
     return new Promise((resolve, reject) => {
-        var settled = false;
-
-        function finish(err, val) {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timer);
-            mqttClient.removeListener('message', onMessage);
-            if (err) reject(err);
-            else resolve(val);
-        }
-
-        // [Fixed] Use a single settled flag so the listener is always removed
-        // exactly once, even when both a timeout and a real response arrive
-        // within the same tick. Without this, the listener leaked on the
-        // mqttClient EventEmitter and accumulated with every sent message,
-        // eventually causing Node's MaxListenersExceededWarning and making
-        // every subsequent /ls_resp fan out to O(n) stale handlers — each
-        // one attempting to re-resolve or re-reject an already-settled promise.
         var timer = setTimeout(() => {
-            finish(new Error('MQTT sendMessage timed out after ' + timeout + 'ms'));
+            mqttClient.removeListener('message', onMessage);
+            reject(new Error('MQTT sendMessage timed out after ' + timeout + 'ms'));
         }, timeout);
 
         function onMessage(topic, message) {
@@ -96,15 +83,21 @@ function publishLsRequestWithAck(mqttClient, content, requestId, timeout) {
             try {
                 var data = JSON.parse(message.toString());
                 if (String(data.request_id) === String(requestId)) {
+                    clearTimeout(timer);
+                    mqttClient.removeListener('message', onMessage);
                     var extracted = extractIdsFromPayload(data.payload ? JSON.parse(data.payload) : {});
-                    finish(null, { threadID: extracted.threadID, messageID: extracted.messageID });
+                    resolve({ threadID: extracted.threadID, messageID: extracted.messageID });
                 }
             } catch (_) { }
         }
 
         mqttClient.on('message', onMessage);
         mqttClient.publish('/ls_req', JSON.stringify(content), { qos: 1 }, err => {
-            if (err) finish(err);
+            if (err) {
+                clearTimeout(timer);
+                mqttClient.removeListener('message', onMessage);
+                reject(err);
+            }
         });
     });
 }
@@ -122,12 +115,7 @@ module.exports = function (defaultFuncs, api, ctx) {
         if (!mqttClient) throw new Error('MQTT client not available');
 
         var baseBody = msg.body != null ? String(msg.body) : "";
-        // [Fixed] Use shared ctx counter (same as sendTypingIndicator/changeAdminStatus)
-        // so request_ids never collide between concurrent sends.
-        // The old Math.floor(100 + random * 900) gave only 900 possible values,
-        // making collisions likely under rapid command usage.
-        if (typeof ctx.wsReqNumber !== "number") ctx.wsReqNumber = 0;
-        var requestId = ++ctx.wsReqNumber;
+        var requestId = Math.floor(100 + Math.random() * 900);
         var epoch = (BigInt(Date.now()) << 22n).toString();
 
         var payload0 = {
@@ -147,6 +135,11 @@ module.exports = function (defaultFuncs, api, ctx) {
 
         var mentionData = buildMentionData(msg, baseBody);
         if (mentionData) payload0.mention_data = mentionData;
+
+        var textEffectId = getTextEffectId(msg);
+        if (textEffectId) payload0.text_effect_id = textEffectId;
+        var effectArray = getTextEffectIds(msg);
+        if (effectArray.length) payload0.text_effect_ids = effectArray;
 
         if (msg.sticker) { payload0.send_type = 2; payload0.sticker_id = msg.sticker; }
         if (msg.emoji) { payload0.send_type = 1; payload0.text = msg.emoji; payload0.hot_emoji_size = toEmojiSize(msg.emojiSize); }
@@ -202,16 +195,12 @@ module.exports = function (defaultFuncs, api, ctx) {
             if (!payload0.attachment_fbids.length) delete payload0.attachment_fbids;
         }
 
-        // [Fixed] Use incrementing task_id per-session so concurrent sends
-        // to the same thread don't produce duplicate task_ids in the same queue.
-        if (typeof ctx.wsTaskNumber !== "number") ctx.wsTaskNumber = 0;
-        var taskBase = (ctx.wsTaskNumber += 2);
         var tasks = [
             {
                 label: '46',
                 payload: JSON.stringify(payload0),
                 queue_name: String(threadID),
-                task_id: taskBase,
+                task_id: 400,
                 failure_count: null
             },
             {
@@ -222,7 +211,7 @@ module.exports = function (defaultFuncs, api, ctx) {
                     sync_group: 1
                 }),
                 queue_name: String(threadID),
-                task_id: taskBase + 1,
+                task_id: 401,
                 failure_count: null
             }
         ];
@@ -258,18 +247,49 @@ module.exports = function (defaultFuncs, api, ctx) {
             }
         }
 
-        // DM attachment sends — use OldMessage (HTTP) instead of MQTT.
+        // Auto-detect isSingleUser from ctx.threadTypes if not explicitly provided.
+        // parseDelta in listenMqtt.js populates ctx.threadTypes[senderID] = 'dm' | 'group'
+        if (isSingleUser === undefined && ctx.threadTypes) {
+            isSingleUser = ctx.threadTypes[String(threadID)] === 'dm';
+        }
+
+        // DM attachment sends — skip MQTT entirely.
+        // For E2EE DMs: route through the E2EE bridge (Noise WebSocket, Signal Protocol).
+        //   Facebook strips attachment_fbids from MQTT messages in E2EE threads
+        //   (can't re-encrypt CDN attachments on the fly), so MQTT silently drops them.
+        //   The vendor's client.sendImage/sendVideo/sendAudio encrypts the file data
+        //   and sends via the Noise WebSocket — the only path that actually delivers
+        //   attachments in E2EE threads.
+        // For non-E2EE DMs: use OldMessage.
+        //   /messaging/send/ with other_user_fbid routing works for plain DMs.
+        //   (For E2EE DMs it returns 404 because the endpoint is deprecated for those.)
         if (isSingleUser && msg.attachment) {
-            try {
-                var omResult = await new Promise((res2, rej2) => {
-                    api.OldMessage(msg, threadID, (err2, data2) => err2 ? rej2(err2) : res2(data2), replyToMessage, true);
-                });
-                if (callback) callback(null, omResult);
-                else resolve(omResult);
-            } catch (omErr) {
-                logger.error("sendMessage", "DM attachment via OldMessage failed: " + (omErr.error || omErr.message || omErr));
-                if (callback) callback(omErr);
-                else reject(omErr);
+            var useE2EE = api.e2ee && typeof api.e2ee.isConnected === "function" && api.e2ee.isConnected();
+            if (useE2EE) {
+                try {
+                    var e2eeResult = await api.e2ee.sendMessage(String(threadID), msg, replyToMessage);
+                    var wrapped = e2eeResult && e2eeResult.messageId
+                        ? { threadID: String(threadID), messageID: String(e2eeResult.messageId) }
+                        : e2eeResult;
+                    if (callback) callback(null, wrapped);
+                    else resolve(wrapped);
+                } catch (e2eeErr) {
+                    logger.error("sendMessage", "E2EE DM attachment send failed: " + (e2eeErr.message || e2eeErr));
+                    if (callback) callback(e2eeErr);
+                    else reject(e2eeErr);
+                }
+            } else {
+                try {
+                    var omResult = await new Promise((res2, rej2) => {
+                        api.OldMessage(msg, threadID, (err2, data2) => err2 ? rej2(err2) : res2(data2), replyToMessage, true);
+                    });
+                    if (callback) callback(null, omResult);
+                    else resolve(omResult);
+                } catch (omErr) {
+                    logger.error("sendMessage", "DM attachment via OldMessage failed: " + (omErr.error || omErr.message || omErr));
+                    if (callback) callback(omErr);
+                    else reject(omErr);
+                }
             }
             return promise;
         }

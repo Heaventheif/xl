@@ -285,6 +285,7 @@ module.exports = function createGetSeqID(deps) {
             return getSeqID(defaultFuncs, api, ctx, globalCallback, form, retryCount + 1);
           }
           logger(`getSeqID: network error persisted after ${MAX_RETRIES} retries, giving up for now: ${msg}`, "error");
+          // [Fixed by xalman] throw instead of silently returning undefined -
           // a bare return here made the caller think this call SUCCEEDED.
           const giveUpErr = new Error(`getSeqID network error persisted after ${MAX_RETRIES} retries: ${msg}`);
           giveUpErr.error = msg;

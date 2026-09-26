@@ -90,7 +90,7 @@ const logger = {
             : `${C.bYellow}${userID}${C.reset}`;
 
         const reconnectStr = autoReconnect
-            ? `${ok}  ${C.bGreen}Enabled${C.reset}`
+            ? `${ok}  ${C.bGreen}Enabled${C.reset}  ${C.dim}(MQTT + E2EE)${C.reset}`
             : `${warn}  ${C.bYellow}Disabled${C.reset}`;
 
         const row = (content) => `  ${mid}  ${content}`;
@@ -99,13 +99,16 @@ const logger = {
             '',
             `  ${bar('╭', '')}`,
             `  ${mid}`,
-            `  ${mid}  ${C.bold}${C.bCyan}${name}${C.reset}  ${C.dim}v${version}${C.reset}`,
+            `  ${mid}  ${C.bold}${C.bCyan}⚡  ${name}${C.reset}  ${C.dim}v${version}${C.reset}`,
             `  ${mid}`,
             `  ${bar('├', '')}`,
             row(`${dot}  ${lbl('Bot            ')}  ${displayName}`),
             row(`${dot}  ${lbl('Region         ')}  ${C.bGreen}${C.bold}${(region || 'AUTO').toUpperCase()}${C.reset}`),
+            row(`${dot}  ${lbl('E2EE           ')}  ${ok}  ${C.bGreen}Signal Protocol${C.reset}`),
             row(`${dot}  ${lbl('Transport      ')}  ${C.bCyan}MQTT${C.reset}  ${C.dim}⟶${C.reset}  ${C.bCyan}WebSocket${C.reset}`),
             row(`${dot}  ${lbl('Auto-Reconnect ')}  ${reconnectStr}`),
+            `  ${bar('├', '')}`,
+            `  ${mid}  ${C.dim}  Developed by ${C.reset}${C.bold}${C.bMagenta}X${C.reset}`,
             `  ${bar('╰', '')}`,
             '',
         ];
@@ -122,7 +125,7 @@ const logger = {
         logger.mqttSpinner = setInterval(() => {
             const f = frames[fi++ % frames.length];
             process.stdout.write(
-                `\r  ${C.bold}${C.bCyan}${f}${C.reset}  ` +
+                `\r  ${C.bold}${C.bCyan}${f}${C.reset}  ${C.cyan}FCA-NX${C.reset} ` +
                 `${C.dim}connecting to MQTT${C.reset}${regionStr}${C.dim} ...${C.reset}   `
             );
         }, 80);

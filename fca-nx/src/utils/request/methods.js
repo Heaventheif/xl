@@ -1,5 +1,4 @@
 "use strict";
-const { throttle } = require("../rateLimiter");
 
 const FormData = require("form-data");
 const headersMod = require("../headers");

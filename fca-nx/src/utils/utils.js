@@ -3,33 +3,11 @@
 var url = require("url");
 var stream = require("stream");
 var querystring = require("querystring");
-// FIX-REQUEST: استبدال حزمة "request" المهجورة (منذ 2020) بـ axios
-// وإزالة bluebird لصالح native Promise المدمج في Node.js ≥ 18
-const axios = require("axios");
-const tough = require("tough-cookie");
-const { wrapper } = require("axios-cookiejar-support");
-const FormData = require("form-data");
-
-// متغير proxy محلي لدعم setProxy()
-let _proxyUrl = undefined;
-
-// بناء axios instance مع دعم cookie jar
-function _buildAxiosInstance(jar) {
-    const instance = wrapper(axios.create({
-        jar: jar || new tough.CookieJar(),
-        withCredentials: true,
-        decompress: true,
-        timeout: 60000,
-        proxy: _proxyUrl ? (() => {
-            try { const u = new URL(_proxyUrl); return { host: u.hostname, port: parseInt(u.port), protocol: u.protocol }; }
-            catch { return undefined; }
-        })() : undefined,
-    }));
-    return instance;
-}
+var CookieJar = require("tough-cookie").CookieJar;
+var requestHttp = require("./request");
 
 function setProxy(proxyUrl) {
-    _proxyUrl = proxyUrl;
+    requestHttp.setProxy(proxyUrl);
 }
 
 function sanitizeHeaderValue(value) {
@@ -55,7 +33,7 @@ function getHeaders(reqUrl, options, ctx, customHeader) {
     var host;
     try { host = new URL(reqUrl).host; } catch (_) { host = reqUrl.replace("https://", "").split("/")[0]; }
     var ua = options.userAgent ||
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36" // fixed: was Safari/Mac, now Chrome/Win;
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Safari/605.1.15";
     var referer = options.referer || "https://www.facebook.com/";
     var origin = referer.replace(/\/+$/, "");
     var contentType = options.contentType || "application/x-www-form-urlencoded";
@@ -121,71 +99,31 @@ function get(reqUrl, jar, qs, options, ctx) {
             if (qs.hasOwnProperty(prop) && getType(qs[prop]) === "Object") qs[prop] = JSON.stringify(qs[prop]);
         }
     }
-    // FIX-REQUEST: استخدام axios بدلاً من request المهجور
-    const instance = _buildAxiosInstance(jar);
-    return instance.get(reqUrl, {
-        headers: getHeaders(reqUrl, options, ctx),
-        params: qs,
-        responseType: "text",
-        validateStatus: () => true,
-    }).then(res => ({ body: res.data, statusCode: res.status }));
+    return requestHttp.get(reqUrl, jar, qs, options, ctx);
 }
 
 function post(reqUrl, jar, form, options, ctx, customHeader) {
-    // FIX-REQUEST: استخدام axios بدلاً من request المهجور
-    const instance = _buildAxiosInstance(jar);
-    const params = new URLSearchParams();
-    if (form && typeof form === "object") {
-        for (const k of Object.keys(form)) {
-            const v = form[k];
-            if (Array.isArray(v)) { v.forEach(x => params.append(k, x)); }
-            else if (v !== null && v !== undefined) { params.append(k, getType(v) === "Object" ? JSON.stringify(v) : String(v)); }
-        }
-    }
-    return instance.post(reqUrl, params.toString(), {
-        headers: {
-            "Content-Type": "application/x-www-form-urlencoded",
-            ...getHeaders(reqUrl, options, ctx, customHeader),
-        },
-        responseType: "text",
-        validateStatus: () => true,
-    }).then(res => ({ body: res.data, statusCode: res.status }));
+    return requestHttp.post(reqUrl, jar, form, options, ctx, customHeader);
 }
 
 function postFormData(reqUrl, jar, form, qs, options, ctx) {
-    // FIX-REQUEST: استخدام axios + FormData بدلاً من request المهجور
-    const instance = _buildAxiosInstance(jar);
-    const fd = new FormData();
-    if (form && typeof form === "object") {
-        for (const k of Object.keys(form)) {
-            const v = form[k];
-            if (v && typeof v === "object" && typeof v.pipe === "function") {
-                fd.append(k, v);
-            } else if (v !== null && v !== undefined) {
-                fd.append(k, String(v));
-            }
-        }
-    }
-    const urlWithQs = qs && Object.keys(qs).length
-        ? reqUrl + "?" + new URLSearchParams(qs).toString()
-        : reqUrl;
-    return instance.post(urlWithQs, fd, {
-        headers: {
-            ...fd.getHeaders(),
-            ...getHeaders(reqUrl, options, ctx),
-        },
-        responseType: "text",
-        validateStatus: () => true,
-    }).then(res => ({ body: res.data, statusCode: res.status }));
+    return requestHttp.postFormData(reqUrl, jar, form, qs, options, ctx);
 }
 
 function getJar() {
-    // FIX-REQUEST: استخدام tough-cookie بدلاً من request.jar() المهجور
-    return new tough.CookieJar();
+    return new CookieJar();
 }
 
 function getAppState(jar) {
-    return jar.getCookies("https://www.facebook.com").map(c => ({
+    if (!jar || typeof jar.getCookies !== "function") return [];
+    var cookies;
+    if (typeof jar.getCookiesSync === "function") {
+        cookies = jar.getCookiesSync("https://www.facebook.com");
+    } else {
+        cookies = jar.getCookies("https://www.facebook.com");
+    }
+    if (!Array.isArray(cookies)) return [];
+    return cookies.map(c => ({
         key: c.key,
         value: c.value,
         domain: c.domain,
@@ -202,7 +140,13 @@ function saveCookies(jar) {
         if (cookies) {
             if (!Array.isArray(cookies)) cookies = [cookies];
             cookies.forEach(c => {
-                try { jar.setCookie(c, "https://www.facebook.com"); } catch (_) { }
+                try {
+                    if (typeof jar.setCookieSync === "function") {
+                        jar.setCookieSync(c, "https://www.facebook.com");
+                    } else if (typeof jar.setCookie === "function") {
+                        jar.setCookie(c, "https://www.facebook.com");
+                    }
+                } catch (_) { }
             });
         }
         return res;
@@ -281,6 +225,7 @@ function decodeClientPayload(payload) {
 
 function parseAndCheckLogin(ctx, defaultFuncs) {
     return function (res) {
+        // [Fixed by xalman] this used to read res.statusCode/res.body, which are the old
         // `request`/`request-promise` library's property names. The actual
         // HTTP client here (src/utils/request) is axios-based, whose
         // responses use res.status/res.data instead - res.body was always

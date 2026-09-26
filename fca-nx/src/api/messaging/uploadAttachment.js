@@ -61,6 +61,7 @@ function respFinalUrl(res) {
 }
 
 function detectCheckpoint(res) {
+  // [Fixed by xalman] res.body -> res.data (axios response shape), same
   // root cause as the parseAndCheckLogin fix in src/utils/utils.js - this
   // was silently always reading undefined and never detecting checkpoints.
   const url = String(respFinalUrl(res) || "");

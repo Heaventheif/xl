@@ -1,8 +1,39 @@
 "use strict";
 const { parseAndCheckLogin } = require("../../utils/client.js");
 const logger = require("../../../func/logger");
-const DOC_ID = "24418640587785718";
-const FRIENDLY_NAME = "CometHovercardQueryRendererQuery";
+
+const DOC_IDS = [
+  {
+    id: "2399631849267992",
+    name: "CometUserProfileCoverPhotoQuery",
+    hasCover: true
+  },
+  {
+    id: "5009315269112105",
+    name: "CometProfilePhotoGridQuery",
+    hasCover: true
+  },
+  {
+    id: "24418640587785718",
+    name: "CometHovercardQueryRendererQuery",
+    hasCover: false
+  },
+  {
+    id: "6003371686559437",
+    name: "CometProfileInfoRendererQuery",
+    hasCover: true
+  },
+  {
+    id: "6184020922587885",
+    name: "CometProfilePageQuery",
+    hasCover: true
+  },
+  {
+    id: "5069749766627730",
+    name: "CometActorProfilePictureQuery",
+    hasCover: false
+  }
+];
 const CALLER_CLASS = "RelayModern";
 
 function toJSONMaybe(data) {
@@ -33,6 +64,32 @@ function usernameFromUrl(raw) {
   return null;
 }
 
+function extractPhotoUrl(photo, depth = 0) {
+  if (!photo || depth > 4) return null;
+  if (typeof photo === "string") {
+    return /^https?:\/\//i.test(photo) ? photo : null;
+  }
+  if (typeof photo !== "object") return null;
+
+  // Facebook has returned direct URLs as well as nested image/photo objects
+  // from Comet hovercards. Walk only the known media keys and prefer direct
+  // URL fields before descending into nested containers.
+  for (const key of [
+    "source",
+    "uri",
+    "url",
+    "image",
+    "photo",
+    "media",
+    "cover_photo",
+    "coverPhoto"
+  ]) {
+    const value = extractPhotoUrl(photo[key], depth + 1);
+    if (value) return value;
+  }
+  return null;
+}
+
 function pickMeta(user) {
   let friendshipStatus = null;
   let gender = null;
@@ -57,6 +114,20 @@ function pickMeta(user) {
   return { friendshipStatus, gender, shortName };
 }
 
+function extractCoverPhoto(user) {
+  const cover = user?.cover_photo;
+  if (!cover) return null;
+  if (typeof cover === "string") return cover;
+  return cover.source?.uri ||
+    cover.source ||
+    cover.uri ||
+    cover.photo?.image?.uri ||
+    cover.photo?.image?.url ||
+    cover.image?.uri ||
+    cover.image?.url ||
+    cover.photo?.url ||
+    null;
+}
 function normalizeUser(user) {
   if (!user) return null;
   const meta = pickMeta(user);
@@ -66,8 +137,10 @@ function normalizeUser(user) {
     name: user.name || null,
     firstName: meta.shortName || null,
     vanity,
-    thumbSrc: user.profile_picture?.uri || null,
-    coverPhoto: user.cover_photo?.source || user.cover_photo?.uri || null,
+    thumbSrc: extractProfilePicture(user),
+    coverPhoto: extractPhotoUrl(
+      user.cover_photo || user.coverPhoto || user.profile_cover_photo
+    ),
     profileUrl: user.profile_url || user.url || null,
     gender: meta.gender || null,
     type: user.__typename || "User",
@@ -136,26 +209,47 @@ function formatUser(user, id) {
 module.exports = function (defaultFuncs, api, ctx) {
   async function fetchOne(userID) {
     const id = String(userID);
-    const variables = {
-      actionBarRenderLocation: "WWW_COMET_HOVERCARD",
-      context: "DEFAULT",
-      entityID: id,
-      scale: 1,
-      __relay_internal__pv__WorkCometIsEmployeeGKProviderrelayprovider: false
-    };
-    const form = {
-      av: String(ctx?.userID || ""),
-      fb_api_caller_class: CALLER_CLASS,
-      fb_api_req_friendly_name: FRIENDLY_NAME,
-      server_timestamps: true,
-      doc_id: DOC_ID,
-      variables: JSON.stringify(variables)
-    };
-    const response = await defaultFuncs.post("https://www.facebook.com/api/graphql/", ctx.jar, form).then(parseAndCheckLogin(ctx, defaultFuncs));
-    const parsed = toJSONMaybe(response) || response;
-    const root = Array.isArray(parsed)? parsed[0] : parsed;
-    const user = root?.data?.node?.comet_hovercard_renderer?.user || null;
-    return normalizeUser(user);
+    let bestUser = null;
+    for (const doc of DOC_IDS) {
+      const variables = doc.name === "CometHovercardQueryRendererQuery"
+        ? {
+            actionBarRenderLocation: "WWW_COMET_HOVERCARD",
+            context: "DEFAULT",
+            entityID: id,
+            scale: 1,
+            __relay_internal__pv__WorkCometIsEmployeeGKProviderrelayprovider: false
+          }
+        : { userID: id, scale: 1 };
+      const form = {
+        av: String(ctx?.userID || ""),
+        fb_api_caller_class: CALLER_CLASS,
+        fb_api_req_friendly_name: doc.name,
+        server_timestamps: true,
+        doc_id: doc.id,
+        variables: JSON.stringify(variables)
+      };
+      try {
+        const response = await defaultFuncs.post("https://www.facebook.com/api/graphql/", ctx.jar, form)
+          .then(parseAndCheckLogin(ctx, defaultFuncs));
+        const parsed = toJSONMaybe(response) || response;
+        const root = Array.isArray(parsed) ? parsed[0] : parsed;
+        const normalized = normalizeUser(findUser(root));
+        if (!normalized?.id) continue;
+        if (!bestUser) {
+          bestUser = normalized;
+        } else {
+          for (const field of ["thumbSrc", "profileUrl", "vanity", "coverPhoto", "firstName", "gender"]) {
+            if (!bestUser[field] && normalized[field]) bestUser[field] = normalized[field];
+          }
+          if (normalized.isVerified) bestUser.isVerified = true;
+          if (normalized.isFriend) bestUser.isFriend = true;
+        }
+        if (doc.hasCover && bestUser.coverPhoto) break;
+      } catch (error) {
+        logger(`getUserInfoV2 ${doc.id}: ${error.message || error}`, "warn");
+      }
+    }
+    return bestUser;
   }
 
   async function fetchLegacy(userIDs) {
@@ -180,7 +274,7 @@ module.exports = function (defaultFuncs, api, ctx) {
         lastName: nameParts.length > 1? nameParts.slice(1).join(" ") : null,
         vanity: profile.vanity || null,
         thumbSrc: null,
-        coverPhoto: profile.cover_photo || null, // FIX: legacy teo add
+        coverPhoto: extractPhotoUrl(profile.cover_photo),
         profileUrl: profile.uri || `https://www.facebook.com/profile.php?id=${id}`,
         gender: profile.gender === 1? "male" : profile.gender === 2? "female" : "no specific gender",
         type: profile.type || "User",
@@ -219,7 +313,7 @@ module.exports = function (defaultFuncs, api, ctx) {
       callback(error);
       returnPromise;
     }
-    (async () => {
+     (async () => {
       try {
         const retObj = {};
         const results = await Promise.allSettled(ids.map(fetchOne));
@@ -265,6 +359,28 @@ module.exports = function (defaultFuncs, api, ctx) {
         return callback(null, retObj);
       }
     })();
-    returnPromise;
+     return returnPromise;
   };
 };
+
+module.exports._private = {
+  extractPhotoUrl,
+  normalizeUser
+};
+
+function findUser(root) {
+  return root?.data?.node?.comet_hovercard_renderer?.user ||
+    root?.data?.node?.user ||
+    root?.data?.node ||
+    root?.data?.user ||
+    root?.data?.viewer ||
+    null;
+}
+
+function extractProfilePicture(user) {
+  return user?.profile_picture?.uri ||
+    user?.profilePicture?.uri ||
+    user?.profile_picture?.source?.uri ||
+    user?.profile_picture?.source ||
+    null;
+}
