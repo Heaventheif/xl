@@ -1,3 +1,4 @@
+import { callFcaApi, hasFcaMethod } from "../utils/core/fcaApi.js";
 
 const _config = {
   name: "user",
@@ -38,7 +39,7 @@ export default {
 
 async function showFriendRequests(api, event, message) {
   const { threadID, messageID } = event;
-  if (typeof api.handleFriendRequest !== "function") {
+  if (!hasFcaMethod(api, "handleFriendRequest")) {
     return api.sendMessage("❌ هذه النسخة من FCA لا توفر API للموافقة على طلبات الصداقة.", threadID, null, messageID);
   }
 
@@ -61,11 +62,11 @@ async function showFriendRequests(api, event, message) {
 
 async function showMessageRequests(api, event, message) {
   const { threadID, messageID, senderID } = event;
-  if (typeof api.getThreadList !== "function" || typeof api.handleMessageRequest !== "function") {
+  if (!hasFcaMethod(api, "getThreadList") || !hasFcaMethod(api, "handleMessageRequest")) {
     return api.sendMessage("❌ هذه النسخة من FCA لا توفر APIs طلبات المراسلة.", threadID, null, messageID);
   }
   try {
-    const threads = await api.getThreadList(50, null, ["PENDING"]);
+    const threads = await callFcaApi(api, "getThreadList", 50, null, ["PENDING"]);
     const requests = (Array.isArray(threads) ? threads : []).filter(thread => {
       const folder = String(thread?.folder || "").toLowerCase();
       return folder === "other" || folder === "pending" || thread?.approvalMode === true;
@@ -85,9 +86,9 @@ async function showMessageRequests(api, event, message) {
 
 async function enrichUsers(api, items) {
   const ids = [...new Set(items.map(item => item?.id).filter(Boolean).map(String))];
-  if (!ids.length || typeof api.getUserInfo !== "function") return items;
+  if (!ids.length || !hasFcaMethod(api, "getUserInfo")) return items;
   try {
-    const info = await api.getUserInfo(ids);
+    const info = await callFcaApi(api, "getUserInfo", ids);
     return items.map(item => {
       const user = info?.[item.id] || info?.[String(item.id)] || {};
       return { ...item, name: user.name || user.fullName || user.displayName || item.name || item.id };
@@ -133,10 +134,10 @@ async function handleRequestReply(api, event, reply) {
   const selected = items[number - 1];
   try {
     if (reply.requestType === "friend") {
-      await api.handleFriendRequest(String(selected.id), true);
+      await callFcaApi(api, "handleFriendRequest", String(selected.id), true);
       api.__friendRequests?.delete(String(selected.id));
     } else {
-      await api.handleMessageRequest(String(selected.threadID || selected.id), true);
+      await callFcaApi(api, "handleMessageRequest", String(selected.threadID || selected.id), true);
     }
     await api.sendMessage(`✅ تمت الموافقة على ${selected.name} — ${selected.id}`, event.threadID, null, event.messageID);
   } catch (error) {
@@ -164,7 +165,7 @@ async function resolvedName(api, event, uid) {
   const cached = nameCache.get(key);
   if (cached) return cached;
   try {
-    const info = await api.getUserInfo(uid);
+    const info = await callFcaApi(api, "getUserInfo", uid);
     const item = info?.[uid] || info?.[String(uid)] || {};
     const name = String(item.name || item.fullName || item.displayName || item.firstName || uid);
     nameCache.delete(key); nameCache.set(key, name);
@@ -185,7 +186,7 @@ async function handleName(api, event, args) {
   if (!newName) return api.sendMessage("⚠️ أدخل الاسم الجديد بعد المنشن.", event.threadID, null, event.messageID);
   const results = [];
   for (const uid of targets) {
-    try { await api.changeNickname(newName, event.threadID, uid); results.push(`✅ تم تغيير لقب ${await resolvedName(api, event, uid)} — ${uid}`); }
+    try { await callFcaApi(api, "changeNickname", newName, event.threadID, uid); results.push(`✅ تم تغيير لقب ${await resolvedName(api, event, uid)} — ${uid}`); }
     catch { results.push(`❌ فشل تغيير لقب ${uid}`); }
   }
   return api.sendMessage(results.join("\n"), event.threadID, null, event.messageID);
@@ -197,7 +198,7 @@ async function handleKick(api, event, args = []) {
   if (targets.includes(String(event.senderID))) return api.sendMessage("⚠️ لا يمكنك طرد نفسك.", event.threadID, null, event.messageID);
   const results = [];
   for (const uid of targets) {
-    try { await api.removeUserFromGroup(uid, event.threadID); results.push(`✅ تم طرد ${await resolvedName(api, event, uid)} — ${uid}`); }
+    try { await callFcaApi(api, "removeUserFromGroup", uid, event.threadID); results.push(`✅ تم طرد ${await resolvedName(api, event, uid)} — ${uid}`); }
     catch { results.push(`❌ فشل طرد ${uid} — تحقق من صلاحيات البوت`); }
   }
   return api.sendMessage(results.join("\n"), event.threadID, null, event.messageID);
@@ -220,7 +221,7 @@ async function handleAdd(api, event, args) {
   if (!targets.length) return api.sendMessage("⚠️ قم بمنشن الشخص أو أدخل UID الشخص المراد إضافته.", event.threadID, null, event.messageID);
   const results = [];
   for (const uid of targets) {
-    try { await api.addUserToGroup(uid, event.threadID); results.push(`✅ تمت إضافة ${await resolvedName(api, event, uid)} — ${uid}`); }
+    try { await callFcaApi(api, "addUserToGroup", uid, event.threadID); results.push(`✅ تمت إضافة ${await resolvedName(api, event, uid)} — ${uid}`); }
     catch (err) { results.push(`❌ فشل إضافة ${uid}: ${err?.error === 1545145 ? "الشخص موجود بالفعل" : err?.error === 200 ? "لا توجد صلاحية كافية" : err?.errorDescription || err?.message || "خطأ غير معروف"}`); }
   }
   return api.sendMessage(results.join("\n"), event.threadID, null, event.messageID);

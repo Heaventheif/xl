@@ -1,5 +1,6 @@
 import { createRequire } from "node:module";
 import { getMqttConfig, getSessionConfig } from "../fcaConfig.js";
+import { callFcaApi } from "./fcaApi.js";
 const _require = createRequire(import.meta.url);
 
 // ── تحميل attachThreadInfoRealtimeSync من fca-nx ─────────────────────────────
@@ -152,8 +153,7 @@ export async function initBotLifecycle(api, botIndex, opts = {}) {
       const uid = api.getCurrentUserID?.();
       if (!uid) return;
       api.__botFbId = String(uid);
-      const info = await new Promise((res, rej) =>
-        api.getUserInfo(uid, (err, r) => err ? rej(err) : res(r)));
+      const info = await callFcaApi(api, "getUserInfo", uid);
       const name = info?.[uid]?.name;
       if (name) {
         api.__botName = name;

@@ -3,6 +3,7 @@ import { HANDLER_KEYS } from "./Loader.js";
 import { checkAuth } from "../middleware/auth.js";
 import { checkAndSetCooldown } from "../middleware/cooldown.js";
 import timing from "../timing.js";
+import { callFcaApi } from "./fcaApi.js";
 
 // ─── Thread info cache ──────────────────────────────────────────
 const threadInfoCache = new Map();
@@ -17,7 +18,7 @@ async function getThreadInfoCached(api, threadID) {
   if (cached) threadInfoCache.delete(key);
 
   try {
-    const data = await api.getThreadInfo(threadID);
+    const data = await callFcaApi(api, "getThreadInfo", threadID);
     if (threadInfoCache.size >= MAX_THREAD_CACHE) {
       threadInfoCache.delete(threadInfoCache.keys().next().value);
     }
@@ -32,7 +33,7 @@ async function fetchAdminIDsFallback(api, threadID) {
   try {
     const rawApi = api.__rawApi || api;
     if (typeof rawApi.getThreadInfo !== "function") return [];
-    const info = await rawApi.getThreadInfo(threadID);
+    const info = await callFcaApi(rawApi, "getThreadInfo", threadID);
     if (Array.isArray(info?.adminIDs) && info.adminIDs.length) return info.adminIDs;
     return Array.isArray(info?.userInfo)
       ? info.userInfo.filter(u => u?.isAdmin || u?.role === "admin" || u?.type === "admin").map(u => u.id).filter(Boolean)

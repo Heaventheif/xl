@@ -1,3 +1,4 @@
+import { callFcaApi, hasFcaMethod } from "../utils/core/fcaApi.js";
 
 const _config = {
     name: "group",
@@ -51,14 +52,14 @@ async function handleInfo(api, event) {
     const {threadID: threadID, messageID: messageID} = event;
     let info;
     try {
-        info = await api.getThreadInfo(threadID);
+        info = await callFcaApi(api, "getThreadInfo", threadID);
     } catch {
         return api.sendMessage("❌ فشل جلب معلومات المجموعة.", threadID, null, messageID);
     }
     const participantIDs = Array.isArray(info.participantIDs) ? info.participantIDs.map(String) : [];
     let userInfo = {};
     try {
-        userInfo = await api.getUserInfo(participantIDs);
+        userInfo = await callFcaApi(api, "getUserInfo", participantIDs);
     } catch (_) {}
     const memberList = participantIDs.slice(0, 30).map(((id, i) => {
         const item = userInfo?.[id] || {};
@@ -73,7 +74,7 @@ async function handleStats(api, event) {
     const {threadID: threadID, messageID: messageID} = event;
     let info;
     try {
-        info = await api.getThreadInfo(threadID);
+        info = await callFcaApi(api, "getThreadInfo", threadID);
     } catch {
         return api.sendMessage("❌ فشل جلب إحصائيات المجموعة.", threadID, null, messageID);
     }
@@ -87,7 +88,7 @@ async function handleStats(api, event) {
 async function handleApproval(api, event) {
     const { threadID, messageID } = event;
     try {
-        const info = await api.getThreadInfo(threadID);
+        const info = await callFcaApi(api, "getThreadInfo", threadID);
         const enabled = Boolean(info?.approvalMode);
         return api.sendMessage(`🔐 موافقة الأعضاء في هذه المجموعة: ${enabled ? "مفعّلة ✅" : "معطّلة ❌"}\n🆔 ${threadID}`, threadID, null, messageID);
     } catch (error) {
@@ -114,7 +115,7 @@ async function handleRename(api, event, newName) {
     const {threadID: threadID, messageID: messageID} = event;
     if (!newName.trim()) return api.sendMessage("⚠️ أدخل الاسم الجديد للمجموعة.", threadID, null, messageID);
     try {
-        await api.setTitle(newName.trim(), threadID);
+        await callFcaApi(api, "setTitle", newName.trim(), threadID);
         api.sendMessage(`✅ تم تغيير اسم المجموعة إلى:\n"${newName.trim()}"`, threadID, null, messageID);
     } catch {
         api.sendMessage("❌ فشل تغيير اسم المجموعة.", threadID, null, messageID);
@@ -133,13 +134,13 @@ async function handleAdmin(api, event, args) {
     }
     if (!targets.length) return api.sendMessage("⚠️ قم بمنشن الشخص أو رد على رسالته أو أدخل UID الشخص.", threadID, null, messageID);
     let info = {};
-    if (typeof api.getUserInfo === "function") {
-        try { info = await api.getUserInfo(targets); } catch (_) {}
+    if (hasFcaMethod(api, "getUserInfo")) {
+        try { info = await callFcaApi(api, "getUserInfo", targets); } catch (_) {}
     }
     const results = [];
     for (const uid of targets) {
         try {
-            await api.changeAdminStatus(threadID, uid, action === "add");
+            await callFcaApi(api, "changeAdminStatus", threadID, uid, action === "add");
             const item = info?.[uid] || {};
             const name = item.name || item.fullName || item.displayName || mentions[uid]?.replace("@", "") || uid;
             results.push(`✅ ${action === "add" ? "تمت إضافة" : "تمت إزالة"} ${name} — ${uid}`);
