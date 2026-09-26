@@ -357,6 +357,8 @@ export class SessionExtender extends EventEmitter {
         await this._api.refreshFbDtsg();
       else if (typeof this._api?.refreshFb_dtsg === "function")
         await this._api.refreshFb_dtsg();
+      else if (typeof this._api?.account?.refreshDtsg === "function")
+        await this._api.account.refreshDtsg();
     } catch (_) {}
   }
 

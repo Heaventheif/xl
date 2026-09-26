@@ -87,6 +87,9 @@ export async function startMqttListener(api, opts = {}) {
         } else if (typeof api.refreshFb_dtsg === "function") {
           await api.refreshFb_dtsg();
           console.log(`[MQTT:${label}] 🔄 fb_dtsg جُدِّد (مباشر) بعد reconnect`);
+        } else if (typeof api.refreshFbDtsg === "function") {
+          await api.refreshFbDtsg();
+          console.log(`[MQTT:${label}] 🔄 fb_dtsg جُدِّد بعد reconnect`);
         }
       } catch (err) {
         console.warn(`[MQTT:${label}] ⚠️ تعذَّر تجديد fb_dtsg:`, err.message);
@@ -164,10 +167,16 @@ export async function initBotLifecycle(api, botIndex, opts = {}) {
   })();
 
   // ── Thread-info realtime sync (من fcanew-r3nz75) ────────────────────────────────
-  if (typeof _attachThreadInfoRealtimeSync === "function") {
+  // fcanew-r3nz75 expects (ctx, models, logger, api). The app currently
+  // has no Sequelize Thread model, so never call it with the raw api alone.
+  const threadModels = global.fcaThreadModels;
+  if (typeof _attachThreadInfoRealtimeSync === "function" && threadModels) {
     try {
-      _attachThreadInfoRealtimeSync(api);
-      console.log(`[SYNC:${label}] ✅ Thread-info realtime sync نشط (fcanew-r3nz75)`);
+      const syncContext = { api };
+      const syncLogger = (message, level = "warn") =>
+        console[level === "error" ? "error" : "warn"](`[SYNC:${label}] ${message}`);
+      const attached = _attachThreadInfoRealtimeSync(syncContext, threadModels, syncLogger, api);
+      if (attached) console.log(`[SYNC:${label}] ✅ Thread-info realtime sync نشط (fcanew-r3nz75)`);
     } catch (e) { console.warn(`[SYNC:${label}] ⚠️`, e.message); }
   }
 
