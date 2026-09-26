@@ -3,16 +3,16 @@ import { getMqttConfig, getSessionConfig } from "../fcaConfig.js";
 import { callFcaApi } from "./fcaApi.js";
 const _require = createRequire(import.meta.url);
 
-// ── تحميل attachThreadInfoRealtimeSync من fca-nx ─────────────────────────────
+// ── تحميل attachThreadInfoRealtimeSync من fcanew-r3nz75 ─────────────────────────────
 let _attachThreadInfoRealtimeSync = null;
 try {
-  const fcaNx = _require("fca-nx");
+  const fcaNx = _require("fcanew-r3nz75");
   _attachThreadInfoRealtimeSync =
     fcaNx.attachThreadInfoRealtimeSync ??
     fcaNx.default?.attachThreadInfoRealtimeSync ??
     null;
   if (_attachThreadInfoRealtimeSync)
-    console.log("[BOT-INIT] ✅ attachThreadInfoRealtimeSync محمَّل من fca-nx");
+    console.log("[BOT-INIT] ✅ attachThreadInfoRealtimeSync محمَّل من fcanew-r3nz75");
 } catch (e) {
   console.warn("[BOT-INIT] ⚠️ تعذَّر تحميل attachThreadInfoRealtimeSync:", e.message);
 }
@@ -95,7 +95,7 @@ export async function startMqttListener(api, opts = {}) {
   });
 
   manager.start();
-  console.log(`[SUCCESS] ${label} مدير MQTT نشط (fca-nx)`);
+  console.log(`[SUCCESS] ${label} مدير MQTT نشط (fcanew-r3nz75)`);
   return manager;
 }
 
@@ -138,7 +138,7 @@ export async function initBotLifecycle(api, botIndex, opts = {}) {
     });
   } catch (_) {}
 
-  console.log(`[LOGIN:${label}] ✅ الاتصال بفيسبوك مستقر (fca-nx)`);
+  console.log(`[LOGIN:${label}] ✅ الاتصال بفيسبوك مستقر (fcanew-r3nz75)`);
 
   // ── تسجيل global ─────────────────────────────────────────────────────────
   global.botApis = (global.botApis || []).filter(item => item !== api && item?.__botIndex !== botIndex);
@@ -163,11 +163,11 @@ export async function initBotLifecycle(api, botIndex, opts = {}) {
     } catch (e) { console.warn(`[NAME:${label}] ⚠️`, e.message); }
   })();
 
-  // ── Thread-info realtime sync (من fca-nx) ────────────────────────────────
+  // ── Thread-info realtime sync (من fcanew-r3nz75) ────────────────────────────────
   if (typeof _attachThreadInfoRealtimeSync === "function") {
     try {
       _attachThreadInfoRealtimeSync(api);
-      console.log(`[SYNC:${label}] ✅ Thread-info realtime sync نشط (fca-nx)`);
+      console.log(`[SYNC:${label}] ✅ Thread-info realtime sync نشط (fcanew-r3nz75)`);
     } catch (e) { console.warn(`[SYNC:${label}] ⚠️`, e.message); }
   }
 

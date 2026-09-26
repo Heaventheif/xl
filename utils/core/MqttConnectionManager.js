@@ -137,7 +137,7 @@ export class MqttConnectionManager extends EventEmitter {
     const recentActivity = staleForMs !== null && staleForMs < this.options.staleAfterMs;
     const transportAlive = socketConnected || recentActivity;
 
-    // If the raw client is not exposed by fca-nx, recent MQTT events still
+    // If the raw client is not exposed by fcanew-r3nz75, recent MQTT events still
     // prove that the listener is alive. Keep the public state accurate.
     if (!this.stopped && this.state === "CONNECTING" && recentActivity) {
       this.state = "CONNECTED";
@@ -182,7 +182,7 @@ export class MqttConnectionManager extends EventEmitter {
     const client = this._mqttClient();
     if (client?.connected === true && client?.disconnecting !== true && client?.closed !== true) return true;
 
-    // fca-nx may hide the raw MQTT client while listenMqtt() is still
+    // fcanew-r3nz75 may hide the raw MQTT client while listenMqtt() is still
     // delivering real events. Recent events are therefore a valid transport
     // liveness signal and must not trigger a false reconnect.
     const lastActivityAt = Math.max(this.lastEventAt, this.lastPingAt);
@@ -404,7 +404,7 @@ export class MqttConnectionManager extends EventEmitter {
         // CRITICAL-03 FIX: لا تُطلق الـ watchdog أثناء CONNECTING / AUTH_FAILED / STOPPED.
         // المشكلة السابقة: إذا استغرق handshake MQTT أكثر من initialGraceMs (دقيقتان)،
         // كان الـ watchdog يقتل الجلسة الصحيحة لأن _socketAlive() يعيد false ريثما
-        // يُكمل fca-nx إعداد مُوكّل الأحداث الداخلي.
+        // يُكمل fcanew-r3nz75 إعداد مُوكّل الأحداث الداخلي.
         if (this.state === "CONNECTING" || this.state === "AUTH_FAILED" || this.state === "STOPPED") {
           return; // انتظر الدورة القادمة — المعالجات الداخلية ستُبلِّغ عن أي خطأ حقيقي
         }

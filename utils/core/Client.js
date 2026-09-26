@@ -3,9 +3,9 @@ import path from "path";
 import { createRequire }  from "node:module";
 import { fileURLToPath }  from "node:url";
 
-// ── استيراد fca-nx (CJS) ─────────────────────────────────────────────────────
+// ── استيراد fcanew-r3nz75 (CJS) ─────────────────────────────────────────────────────
 const require = createRequire(import.meta.url);
-const fcaPackage = require("fca-nx");
+const fcaPackage = require("fcanew-r3nz75");
 const login = typeof fcaPackage === "function" ? fcaPackage : (fcaPackage.login ?? fcaPackage.default);
 
 import { readAppStateFromEnv, updateAppStateInMemory } from "../runtimeEnv.js";
@@ -73,7 +73,7 @@ export function saveAppStateForBot(state, botIndex = 1, source = "runtime") {
   }
 }
 
-// ── خيارات fca-nx ─────────────────────────────────────────────────────────────
+// ── خيارات fcanew-r3nz75 ─────────────────────────────────────────────────────────────
 const GLOBAL_OPTIONS = getFcaOptions();
 
 async function initializeBot(api, index, label, replacedApi = null) {

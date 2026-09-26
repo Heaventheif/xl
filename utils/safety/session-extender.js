@@ -43,7 +43,7 @@ const KEEPALIVE_AGENT = new HttpsAgent({
 export class SessionExtender extends EventEmitter {
   /**
    * @param {object}   opts
-   * @param {object}   opts.api              — كائن api من fca-nx
+   * @param {object}   opts.api              — كائن api من fcanew-r3nz75
    * @param {number}   opts.botIndex
    * @param {object}   [opts.cookieRefresher]
    * @param {object}   [opts.sessionGuard]
