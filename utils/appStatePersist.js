@@ -19,6 +19,26 @@ const CRITICAL_COOKIES = [ "c_user", "xs" ];
 
 const REFRESHABLE_COOKIES = [ "fr", "sb" ];
 
+// FIX-DATR: الحفاظ على قيمة datr الأصلية عند تحديث AppState
+// المشكلة: datr يتغير عند كل login جديد → يُشعل bot detection
+// الحل: حفظ datr المُولَّد أول مرة وإعادة استخدامه عند refresh
+// (datr = device fingerprint — المتصفح الحقيقي لا يغيّره بين الطلبات)
+function _preserveDeviceFingerprint(oldState, newState) {
+    if (!Array.isArray(oldState) || !Array.isArray(newState)) return newState;
+    const datr = oldState.find(c => (c.key || c.name) === "datr");
+    if (!datr) return newState; // لا يوجد datr قديم — لا شيء للحفظ
+    // استبدل datr في الحالة الجديدة بالقيمة الأصلية
+    const hasDatr = newState.some(c => (c.key || c.name) === "datr");
+    if (hasDatr) {
+        return newState.map(c => (c.key || c.name) === "datr"
+            ? { ...c, value: datr.value }
+            : c
+        );
+    }
+    // إذا اختفى datr من الحالة الجديدة — أعده
+    return [...newState, datr];
+}
+
 const ALGO = "aes-256-gcm";
 
 const IV_LEN = 12;
@@ -175,7 +195,12 @@ export function persistAppState(state, source = "auto") {
         console.warn(`[APPSTATE] ⚠️  persistAppState: invalid state (${source})`);
         return false;
     }
-    const normalized = _normalizeAppState(state);
+    // FIX-DATR: احتفظ بقيمة datr الأصلية من الذاكرة لتجنب bot detection
+    let stateToSave = state;
+    if (_inMemoryState && _inMemoryState.length > 0) {
+        stateToSave = _preserveDeviceFingerprint(_inMemoryState, state);
+    }
+    const normalized = _normalizeAppState(stateToSave);
     const newHash = _hashState(normalized);
     if (newHash === _inMemoryHash) return false;
     _updateMemoryCache(normalized, newHash);

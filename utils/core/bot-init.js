@@ -71,6 +71,27 @@ export async function startMqttListener(api, opts = {}) {
     console.error(`[MQTT:${label}] 🔒 AppState محجوب:`, h.lastError || "auth_failed"));
   manager.on("cooldown", (h) =>
     console.warn(`[MQTT:${label}] ⏳ cooldown حتى ${h.cooldownUntil}`));
+  // FIX-DTSG: تجديد fb_dtsg بعد كل MQTT reconnect ناجح
+  // fb_dtsg token ضروري لكل طلب POST — قد يتقادم بعد انقطاع الاتصال
+  // FIX-DTSG: تجديد fb_dtsg بعد كل MQTT reconnect ناجح
+  // fb_dtsg token ضروري لكل طلب POST — قد يتقادم بعد انقطاع الاتصال
+  manager.on("connected", ({ reason }) => {
+    if (reason === "initial") return; // الأول لا يحتاج تجديد
+    setTimeout(async () => {
+      try {
+        const extender = api._sessionExtender;
+        if (extender && typeof extender.pingNow === "function") {
+          await extender.pingNow();
+          console.log(`[MQTT:${label}] 🔄 fb_dtsg جُدِّد بعد reconnect (${reason})`);
+        } else if (typeof api.refreshFb_dtsg === "function") {
+          await api.refreshFb_dtsg();
+          console.log(`[MQTT:${label}] 🔄 fb_dtsg جُدِّد (مباشر) بعد reconnect`);
+        }
+      } catch (err) {
+        console.warn(`[MQTT:${label}] ⚠️ تعذَّر تجديد fb_dtsg:`, err.message);
+      }
+    }, 3000); // انتظار 3 ثوانٍ للتأكد من استقرار الجلسة
+  });
 
   manager.start();
   console.log(`[SUCCESS] ${label} مدير MQTT نشط (fca-nx)`);

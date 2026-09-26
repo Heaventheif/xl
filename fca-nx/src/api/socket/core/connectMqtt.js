@@ -1,8 +1,17 @@
 "use strict";
 
-// Randomize MQTT keepalive per-connection (45-75s) to avoid fixed-interval fingerprint
-// Source: fca-unofficial analysis + PDF architectural recommendation
-const _randomKeepAlive = () => 45 + Math.floor(Math.random() * 30);
+// FIX-KEEPALIVE: pingIntervalMs قابل للتخصيص عبر FCA_MQTT_KEEPALIVE مع الحفاظ على الجيتر العشوائي.
+// بدون env var يستخدم 45–75 ثانية عشوائياً لتجنب البصمة الثابتة.
+const _envMqttKeepAlive = () => {
+  const v = parseInt(process.env.FCA_MQTT_KEEPALIVE, 10);
+  if (!isNaN(v) && v > 0) return v;
+  return null; // fall through to random jitter
+};
+const _randomKeepAlive = () => {
+  const fixed = _envMqttKeepAlive();
+  if (fixed !== null) return fixed;
+  return 45 + Math.floor(Math.random() * 30);
+};
 // Non-deterministic forceCycle interval (±15%) to avoid periodic reconnect fingerprint
 const _jitteredCycle = (ms) => Math.round(ms * (0.85 + Math.random() * 0.3));
 
@@ -45,6 +54,15 @@ module.exports = function createListenMqtt(deps) {
       if (ctx._reconnectTimer) {
         logger("mqtt reconnect already scheduled", "warn");
         return; // debounce
+      }
+      // FIX-ALERT: تنبيه المطوِّر عند تجاوز 20 خطأ متراكم — قد يكون Facebook غيَّر endpoint
+      ctx._consecutiveErrors = (ctx._consecutiveErrors || 0) + 1;
+      if (ctx._consecutiveErrors > 20) {
+        logger(
+          `[ALERT] تجاوز عدد الأخطاء المتتالية في MQTT الحدَّ ${ctx._consecutiveErrors}/20. ` +
+          "قد يكون Facebook غيَّر endpoint أو format. راجع الـ logs ويَجدُر تحديث المكتبة.",
+          "error"
+        );
       }
       if (ctx._ending) {
         // Covers confirmed logout/checkpoint/blocked-login/invalid-session:
@@ -118,8 +136,11 @@ module.exports = function createListenMqtt(deps) {
 
     const options = {
       clientId: "mqttwsclient",
+      // FIX-PROTOCOL: تحديث MQTT protocolVersion من 3 إلى 4 (MQTT v3.1.1)
+      // v3 = MQIsdp (بروتوكول قديم MQTT 3.1)، v4 = MQTT 3.1.1 المعتمد من FB.
+      // "MQIsdp" مع v4 هو ما ترسله عملاء Messenger الحقيقيون.
       protocolId: "MQIsdp",
-      protocolVersion: 3,
+      protocolVersion: 4,
       username: JSON.stringify(username),
       clean: true,
       wsOptions: {
@@ -213,13 +234,32 @@ module.exports = function createListenMqtt(deps) {
       // reset the backoff counter so a later transient failure starts a
       // fresh backoff sequence instead of inheriting a long delay from an
       // unrelated earlier outage.
+      const wasReconnect = (ctx._reconnectAttempts || 0) > 0; // FIX-DTSG: هل هذا reconnect وليس first connect؟
       ctx._reconnectAttempts = 0;
+      ctx._consecutiveErrors = 0; // FIX-ALERT: reset عداد الأخطاء المتراكمة عند الاتصال الناجح
       if (ctx._rTimeout) {
         clearTimeout(ctx._rTimeout);
         ctx._rTimeout = null;
       }
 
       topics.forEach(t => mqttClient.subscribe(t));
+
+      // FIX-DTSG: تحديث fb_dtsg بعد كل reconnect ناجح (ليس first connect)
+      // fb_dtsg token ينتهي صلاحيته ويحتاج تحديث بعد انقطاع الجلسة.
+      // تأخير 3 ثوانٍ لإتاحة الوقت لاستقرار الاتصال أولاً.
+      if (wasReconnect && api && typeof api.refreshFb_dtsg === "function") {
+        setTimeout(function () {
+          if (!isCurrent() || ctx._ending) return;
+          api.refreshFb_dtsg().then(function () {
+            logger("✅ fb_dtsg refreshed after MQTT reconnect", "info");
+          }).catch(function (e) {
+            logger(
+              `fb_dtsg refresh after MQTT reconnect failed (non-fatal): ${e && e.message ? e.message : String(e)}`,
+              "warn"
+            );
+          });
+        }, 3000);
+      }
 
 
       const queue = {

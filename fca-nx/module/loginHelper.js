@@ -275,6 +275,40 @@ function setJarFromPairs(j, pairs, domain) {
   }
 }
 
+// ─── FIX-DATR: datr fingerprint preservation ──────────────────────────────────
+// "datr" هو معرِّف جهاز Facebook. إذا تغيَّر بعد تحديث الـ cookies، يرصد
+// Facebook جهازاً "جديداً" ويُفعِّل checkpoint أو قد يحظر الجلسة.
+// الحلّ: نحفظ datr من appState الأصلي ونستعيده إذا تغيَّر أثناء الـ refresh.
+
+function _getDatrFromJar(jar) {
+  try {
+    const cookies = jar.getCookiesSync("https://www.facebook.com");
+    const c = cookies.find(c => c.key === "datr");
+    return c ? c.value : null;
+  } catch { return null; }
+}
+
+/**
+ * يُعيد قيمة datr إلى الـ jar إذا كانت قد تغيَّرت أو فُقدت أثناء
+ * عملية refresh. يُطبَّق فقط إذا كانت القيمة الأصلية موجودة.
+ *
+ * @param {CookieJar} jar          - الـ jar المراد إصلاحه
+ * @param {string|null} originalDatr - القيمة الأصلية المحفوظة قبل الـ refresh
+ */
+function _restoreDatrIfLost(jar, originalDatr) {
+  if (!originalDatr) return;
+  try {
+    const cookies = jar.getCookiesSync("https://www.facebook.com");
+    const current = cookies.find(c => c.key === "datr");
+    if (!current || !current.value || current.value !== originalDatr) {
+      // datr تغيَّر أو فُقد — نستعيد القيمة الأصلية
+      setJarFromPairs(jar, [`datr=${originalDatr}`], ".facebook.com");
+      logger("🔒 datr fingerprint preserved (restored original AppState value)", "info");
+    }
+  } catch { /* silent — non-fatal */ }
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 function cookieHeaderFromJar(j) {
   const urls = ["https://www.facebook.com"];
   const seen = new Set();
@@ -568,7 +602,10 @@ async function tryAutoLoginIfNeeded(currentHtml, currentCookies, globalOptions, 
   if (hydrated) {
     logger("tryAutoLoginIfNeeded: Trying backup from DB...", "info");
     try {
+      // FIX-DATR: احفظ datr من الـ backup قبل التحقق
+      const _dbDatr = _getDatrFromJar(jar);
       const initial = await get("https://www.facebook.com/", jar, null, globalOptions).then(saveCookies(jar));
+      _restoreDatrIfLost(jar, _dbDatr);
       const resB = (await ctxRef.bypassAutomation(initial, jar)) || initial;
       const htmlB = resB && resB.data ? resB.data : "";
       if (!htmlB.includes("/checkpoint/block/?next")) {
@@ -902,13 +939,20 @@ function loginHelper(appState, Cookie, email, password, globalOptions, callback)
         }
       };
       if (appState || Cookie) {
+        // FIX-DATR: احفظ datr من appState قبل أي GET ← قد يُحدِّث Facebook قيمته
+        const _origDatr = _getDatrFromJar(jar);
         const initial = await get("https://www.facebook.com/", jar, null, globalOptions).then(saveCookies(jar));
+        // FIX-DATR: استعِد datr إذا غيَّره Facebook أثناء الـ response
+        _restoreDatrIfLost(jar, _origDatr);
         return (await ctx.bypassAutomation(initial, jar)) || initial;
       }
       const hydrated = await hydrateJarFromDB(null, jar);
       if (hydrated) {
         logger(chalk.italic("🔄 AppState backup found — restoring session..."), "info");
+        // FIX-DATR: احفظ datr من الـ backup قبل الـ GET
+        const _origDatrBackup = _getDatrFromJar(jar);
         const initial = await get("https://www.facebook.com/", jar, null, globalOptions).then(saveCookies(jar));
+        _restoreDatrIfLost(jar, _origDatrBackup);
         return (await ctx.bypassAutomation(initial, jar)) || initial;
       }
       logger(chalk.italic("😐 AppState expired — logging in with credentials..."), "warn");

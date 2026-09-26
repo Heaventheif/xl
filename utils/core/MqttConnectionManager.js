@@ -10,7 +10,10 @@ const DEFAULTS = {
   cooldownMs: 15 * 60_000,
   authBlockCooldownMs: 90 * 60_000,  // ← 90 دقيقة انتظار عند login_blocked
   maxFastAttempts: 10,
-  pingIntervalMs: 120_000,
+  // FIX-ENV: قابل للتخصيص عبر MQTT_PING_MS
+  // في Render/Railway المجاني: 240000 (4 دق) لتجنب sleep بعد 5 دق
+  // في VPS مستقر: 600000 (10 دق) تكفي
+  pingIntervalMs: process.env.MQTT_PING_MS ? Number(process.env.MQTT_PING_MS) : 120_000,
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -62,6 +65,9 @@ export class MqttConnectionManager extends EventEmitter {
     this.authRetryTimer = null;
     this._authBlockedUntil = null;
     this.cooldownUntil = 0;
+    // FIX-BUFFER: مخزن مؤقت للأحداث المستقبَلة أثناء معالجة حدث سابق
+    this._eventBuffer = [];
+    this._processingEvent = false;
     this.connectedSince = 0;
     this.lastEventAt = 0;
     this.lastPingAt = 0;
@@ -295,8 +301,19 @@ export class MqttConnectionManager extends EventEmitter {
     if (ok) this.totalReconnects++;
 
     if (!ok && this.reconnectAttempts >= this.options.maxFastAttempts) {
-      this.cooldownUntil = Date.now() + this.options.cooldownMs;
+      // FIX-COOLDOWN: cooldown تدريجي (exponential) بدلاً من الثابت
+      // يتضاعف مع كل دورة فشل، بحد أقصى 4 ساعات
+      if (!this._cooldownCount) this._cooldownCount = 0;
+      this._cooldownCount++;
+      const baseCooldown = this.options.cooldownMs; // 15 دقيقة
+      const expCooldown = Math.min(
+        baseCooldown * Math.pow(2, Math.floor(this._cooldownCount / 3)),
+        4 * 60 * 60_000  // حد أقصى: 4 ساعات
+      );
+      this.cooldownUntil = Date.now() + expCooldown;
       this.state = "RECONNECT_WAIT";
+      const waitMin = Math.round(expCooldown / 60_000);
+      console.warn(`[MQTT:${this.label}] ⏳ cooldown تدريجي: ${waitMin} دقيقة (دورة #${this._cooldownCount})`);
       this.emit("cooldown", this.health());
     }
     return ok;
@@ -324,9 +341,34 @@ export class MqttConnectionManager extends EventEmitter {
       this.cooldownUntil = 0;
       // Reset consecutive error count once the session has been stable for stableWindowMs.
       this.consecutiveErrors = 0;
+      // Reset cooldown counter on stable connection
+      if (this._cooldownCount) this._cooldownCount = 0;
     }
     this.state = "CONNECTED";
     this._emitState();
+    // FIX-BUFFER: إذا كنا نعالج حدثاً آخر، خزِّن هذا الحدث مؤقتاً
+    if (this._processingEvent) {
+      const EVENT_BUFFER_MAX = 50;
+      if (this._eventBuffer.length < EVENT_BUFFER_MAX)
+        this._eventBuffer.push(event);
+      return;
+    }
+    this._dispatchBufferedEvent(event);
+  }
+
+  _dispatchBufferedEvent(event) {
+    // FIX-BUFFER: إرسال الحدث مع معالجة ما في الطابور بعده
+    this._processingEvent = true;
+    try {
+      this.emit("event", event);
+    } finally {
+      this._processingEvent = false;
+      if (this._eventBuffer.length > 0) {
+        const next = this._eventBuffer.shift();
+        // استخدام setImmediate لتجنب stack overflow
+        setImmediate(() => this._dispatchBufferedEvent(next));
+      }
+    }
   }
 
   _recordError(error, forcedClass = null) {
@@ -340,6 +382,14 @@ export class MqttConnectionManager extends EventEmitter {
     this.lastDisconnectAt = Date.now();
     if (errorClass === "AUTH_FAILED") this.state = "AUTH_FAILED";
     else if (this.state !== "STOPPED") this.state = "DEGRADED";
+    // FIX-ALERT: تنبيه عند تراكم أخطاء متتالية كثيرة — قد يعني تغييراً جذرياً من Meta
+    if (this.consecutiveErrors === 20) {
+      console.error(
+        `[MQTT:${this.label}] 🚨 ALERT: ${this.consecutiveErrors} خطأ متتالياً — ` +
+        `قد يكون Facebook غيَّر endpoint أو format. آخر خطأ: ${message}`
+      );
+      this.emit("structural_error_suspected", { consecutiveErrors: this.consecutiveErrors, message, errorClass });
+    }
     this.emit("error_observed", { errorClass, message, at: this.lastErrorAt });
     this._emitState();
   }

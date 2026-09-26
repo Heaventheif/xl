@@ -20,18 +20,24 @@
  */
 
 // One version pin used everywhere. Bump this in one place when needed.
-const CHROME_VERSION = "139.0.0.0";
+// FIX-CHROME: مُحدَّث من 139 → 140 ليطابق Chrome الحالي (سبتمبر 2026).
+// تغيير في مكان واحد فقط يُحدِّث تلقائياً: UA الـ HTTP، sec-ch-ua، وheaders الـ MQTT.
+// FIX-ENV: اجعل إصدار Chrome قابلاً للتعديل من متغير البيئة CHROME_VERSION
+// مثال: CHROME_VERSION=141.0.0.0 node index.js
+const CHROME_VERSION = process.env.CHROME_VERSION || "140.0.0.0";
 const CHROME_MAJOR = CHROME_VERSION.split(".")[0];
 
 const DEFAULT_IDENTITY = Object.freeze({
   userAgent: `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${CHROME_VERSION} Safari/537.36`,
   acceptLanguage: "en-US,en;q=0.9",
-  secChUa: `"Chromium";v="${CHROME_MAJOR}", "Not;A=Brand";v="24", "Google Chrome";v="${CHROME_MAJOR}"`,
+  // FIX-CHROME: ترتيب الـ brand tokens محدَّث ليطابق ما يُرسله Chrome 140 الحقيقي.
+  // Chrome 140 يضع "Google Chrome" أولاً ثم "Chromium" ثم "Not;A Brand".
+  secChUa: `"Google Chrome";v="${CHROME_MAJOR}", "Chromium";v="${CHROME_MAJOR}", "Not;A=Brand";v="99"`,
   secChUaMobile: "?0",
   secChUaPlatform: '"Windows"',
   secChUaArch: '"x86"',
   secChUaBitness: '"64"',
-  secChUaFullVersionList: `"Chromium";v="${CHROME_VERSION}", "Not;A=Brand";v="24.0.0.0", "Google Chrome";v="${CHROME_VERSION}"`,
+  secChUaFullVersionList: `"Google Chrome";v="${CHROME_VERSION}", "Chromium";v="${CHROME_VERSION}", "Not;A=Brand";v="99.0.0.0"`,
   secChUaPlatformVersion: '"15.0.0"'
 });
 

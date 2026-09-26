@@ -2,16 +2,34 @@
 
 var url = require("url");
 var stream = require("stream");
-var bluebird = require("bluebird");
 var querystring = require("querystring");
-var request = bluebird.promisify(require("request").defaults({ jar: true }));
+// FIX-REQUEST: استبدال حزمة "request" المهجورة (منذ 2020) بـ axios
+// وإزالة bluebird لصالح native Promise المدمج في Node.js ≥ 18
+const axios = require("axios");
+const tough = require("tough-cookie");
+const { wrapper } = require("axios-cookiejar-support");
+const FormData = require("form-data");
+
+// متغير proxy محلي لدعم setProxy()
+let _proxyUrl = undefined;
+
+// بناء axios instance مع دعم cookie jar
+function _buildAxiosInstance(jar) {
+    const instance = wrapper(axios.create({
+        jar: jar || new tough.CookieJar(),
+        withCredentials: true,
+        decompress: true,
+        timeout: 60000,
+        proxy: _proxyUrl ? (() => {
+            try { const u = new URL(_proxyUrl); return { host: u.hostname, port: parseInt(u.port), protocol: u.protocol }; }
+            catch { return undefined; }
+        })() : undefined,
+    }));
+    return instance;
+}
 
 function setProxy(proxyUrl) {
-    if (typeof proxyUrl === "undefined") {
-        request = bluebird.promisify(require("request").defaults({ jar: true }));
-    } else {
-        request = bluebird.promisify(require("request").defaults({ jar: true, proxy: proxyUrl }));
-    }
+    _proxyUrl = proxyUrl;
 }
 
 function sanitizeHeaderValue(value) {
@@ -103,49 +121,67 @@ function get(reqUrl, jar, qs, options, ctx) {
             if (qs.hasOwnProperty(prop) && getType(qs[prop]) === "Object") qs[prop] = JSON.stringify(qs[prop]);
         }
     }
-    var op = {
+    // FIX-REQUEST: استخدام axios بدلاً من request المهجور
+    const instance = _buildAxiosInstance(jar);
+    return instance.get(reqUrl, {
         headers: getHeaders(reqUrl, options, ctx),
-        timeout: 60000,
-        qs: qs,
-        url: reqUrl,
-        method: "GET",
-        jar: jar,
-        gzip: true
-    };
-    return request(op);
+        params: qs,
+        responseType: "text",
+        validateStatus: () => true,
+    }).then(res => ({ body: res.data, statusCode: res.status }));
 }
 
 function post(reqUrl, jar, form, options, ctx, customHeader) {
-    var op = {
-        headers: getHeaders(reqUrl, options, ctx, customHeader),
-        timeout: 60000,
-        url: reqUrl,
-        method: "POST",
-        form: form,
-        jar: jar,
-        gzip: true
-    };
-    return request(op);
+    // FIX-REQUEST: استخدام axios بدلاً من request المهجور
+    const instance = _buildAxiosInstance(jar);
+    const params = new URLSearchParams();
+    if (form && typeof form === "object") {
+        for (const k of Object.keys(form)) {
+            const v = form[k];
+            if (Array.isArray(v)) { v.forEach(x => params.append(k, x)); }
+            else if (v !== null && v !== undefined) { params.append(k, getType(v) === "Object" ? JSON.stringify(v) : String(v)); }
+        }
+    }
+    return instance.post(reqUrl, params.toString(), {
+        headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+            ...getHeaders(reqUrl, options, ctx, customHeader),
+        },
+        responseType: "text",
+        validateStatus: () => true,
+    }).then(res => ({ body: res.data, statusCode: res.status }));
 }
 
 function postFormData(reqUrl, jar, form, qs, options, ctx) {
-    var headers = getHeaders(reqUrl, options, ctx);
-    headers["Content-Type"] = "multipart/form-data";
-    var op = {
-        headers: headers,
-        timeout: 60000,
-        url: reqUrl,
-        method: "POST",
-        formData: form,
-        qs: qs,
-        jar: jar,
-        gzip: true
-    };
-    return request(op);
+    // FIX-REQUEST: استخدام axios + FormData بدلاً من request المهجور
+    const instance = _buildAxiosInstance(jar);
+    const fd = new FormData();
+    if (form && typeof form === "object") {
+        for (const k of Object.keys(form)) {
+            const v = form[k];
+            if (v && typeof v === "object" && typeof v.pipe === "function") {
+                fd.append(k, v);
+            } else if (v !== null && v !== undefined) {
+                fd.append(k, String(v));
+            }
+        }
+    }
+    const urlWithQs = qs && Object.keys(qs).length
+        ? reqUrl + "?" + new URLSearchParams(qs).toString()
+        : reqUrl;
+    return instance.post(urlWithQs, fd, {
+        headers: {
+            ...fd.getHeaders(),
+            ...getHeaders(reqUrl, options, ctx),
+        },
+        responseType: "text",
+        validateStatus: () => true,
+    }).then(res => ({ body: res.data, statusCode: res.status }));
 }
 
 function getJar() {
-    return require("request").jar();
+    // FIX-REQUEST: استخدام tough-cookie بدلاً من request.jar() المهجور
+    return new tough.CookieJar();
 }
 
 function getAppState(jar) {
