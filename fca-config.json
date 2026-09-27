@@ -4,7 +4,6 @@
   "processErrorHandlers": true,
   "options": {
     "selfListen": false,
-    "selfListenEvent": false,
     "listenEvents": true,
     "listenTyping": false,
     "updatePresence": false,

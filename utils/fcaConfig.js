@@ -12,7 +12,6 @@ const DEFAULTS = {
   processErrorHandlers: false,
   options: {
     selfListen: false,
-    selfListenEvent: false,
     listenEvents: true,
     listenTyping: false,
     updatePresence: false,
