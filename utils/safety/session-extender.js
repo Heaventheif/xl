@@ -76,6 +76,7 @@ export class SessionExtender extends EventEmitter {
     this._lastExtension  = null;
     this._lastKeepAlive  = null;
     this._startTime      = null;
+    this._lastFbDtsgRefresh = 0;
     this._totalFailCount = 0;
 
     this._consecutiveFails = 0;
@@ -354,13 +355,23 @@ export class SessionExtender extends EventEmitter {
   }
 
   async _refreshFbDtsg() {
+    const now = Date.now();
+    if (now - this._lastFbDtsgRefresh < 24 * 60 * 60_000) return;
+    // al-fca's no-argument refreshFb_dtsg() throws on some login pages.
+    // Fetch a token with its guarded helper, then update ctx through the
+    // non-fetching object form only when a token was actually found.
+    this._lastFbDtsgRefresh = now;
     try {
-      if (typeof this._api?.refreshFbDtsg === "function")
+      if (typeof this._api?.getFreshDtsg === "function" && typeof this._api?.refreshFb_dtsg === "function") {
+        const token = await this._api.getFreshDtsg();
+        if (token) await this._api.refreshFb_dtsg({ fb_dtsg: token });
+      } else if (typeof this._api?.refreshFbDtsg === "function") {
         await this._api.refreshFbDtsg();
-      else if (typeof this._api?.refreshFb_dtsg === "function")
+      } else if (typeof this._api?.refreshFb_dtsg === "function") {
         await this._api.refreshFb_dtsg();
-      else if (typeof this._api?.account?.refreshDtsg === "function")
+      } else if (typeof this._api?.account?.refreshDtsg === "function") {
         await this._api.account.refreshDtsg();
+      }
     } catch (_) {}
   }
 

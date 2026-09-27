@@ -17,3 +17,20 @@ test("a zero keep-alive interval disables pings and their timer", async () => {
   assert.equal(extender._keepAliveTimer, null);
   extender.stop();
 });
+
+test("al-fca fb_dtsg refresh uses its guarded fresh-token path at most daily", async () => {
+  let fetches = 0;
+  let applied;
+  const extender = new SessionExtender({
+    api: {
+      async getFreshDtsg() { fetches += 1; return "fresh-token"; },
+      async refreshFb_dtsg(value) { applied = value; },
+    },
+  });
+
+  await extender._refreshFbDtsg();
+  await extender._refreshFbDtsg();
+
+  assert.equal(fetches, 1);
+  assert.deepEqual(applied, { fb_dtsg: "fresh-token" });
+});

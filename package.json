@@ -20,5 +20,14 @@
     "fs-extra": "^11.3.6",
     "google-translate-api-x": "^10.7.3",
     "mongodb": "^6.20.0"
+  },
+  "overrides": {
+    "al-fca": {
+      "request": {
+        "form-data": "2.5.6",
+        "qs": "6.16.0",
+        "tough-cookie": "4.1.4"
+      }
+    }
   }
 }
