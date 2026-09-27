@@ -68,6 +68,7 @@ export class MqttConnectionManager extends EventEmitter {
     // FIX-BUFFER: مخزن مؤقت للأحداث المستقبَلة أثناء معالجة حدث سابق
     this._eventBuffer = [];
     this._processingEvent = false;
+    this.connectingStartedAt = 0;
     this.connectedSince = 0;
     this.lastEventAt = 0;
     this.lastPingAt = 0;
@@ -94,7 +95,6 @@ export class MqttConnectionManager extends EventEmitter {
     this.started = true;
     this.stopped = false;
     this.state = "RECONNECTING";
-    this.lastEventAt = Date.now();
     this._scheduleWatchdog();
     this._schedulePing();
     void this._connectOnce("startup");
@@ -130,16 +130,17 @@ export class MqttConnectionManager extends EventEmitter {
   health() {
     const now = Date.now();
     const client = this._mqttClient();
-    const socketConnected = client?.connected === true;
+    const socketConnected = client?.connected === true && client?.disconnecting !== true && client?.closed !== true;
+    const socketStateKnown = typeof client?.connected === "boolean";
     const lastActivityAt = Math.max(this.lastEventAt, this.lastPingAt);
     const staleForMs = lastActivityAt ? Math.max(0, now - lastActivityAt) : null;
     const stableForMs = this.connectedSince ? Math.max(0, now - this.connectedSince) : 0;
     const recentActivity = staleForMs !== null && staleForMs < this.options.staleAfterMs;
-    const transportAlive = socketConnected || recentActivity;
+    const transportAlive = socketStateKnown ? socketConnected : recentActivity;
 
-    // If the raw client is not exposed by fcanew-r3nz75, recent MQTT events still
-    // prove that the listener is alive. Keep the public state accurate.
-    if (!this.stopped && this.state === "CONNECTING" && recentActivity) {
+    // al-fca exposes its active client as global.mqttClient rather than on api.
+    // Recent MQTT events remain a valid liveness signal if that field is absent.
+    if (!this.stopped && this.state === "CONNECTING" && recentActivity && (!socketStateKnown || socketConnected)) {
       this.state = "CONNECTED";
     }
 
@@ -175,16 +176,17 @@ export class MqttConnectionManager extends EventEmitter {
   }
 
   _mqttClient() {
-    return this.api?._mqttClient ?? this.api?._ctx?.mqttClient ?? this.api?._ctx?.mqtt ?? this.api?._mqtt ?? null;
+    return this.api?._mqttClient ?? this.api?._ctx?.mqttClient ?? this.api?._ctx?.mqtt ?? this.api?._mqtt ?? global.mqttClient ?? null;
   }
 
   _socketAlive() {
     const client = this._mqttClient();
-    if (client?.connected === true && client?.disconnecting !== true && client?.closed !== true) return true;
+    if (typeof client?.connected === "boolean") {
+      return client.connected && client.disconnecting !== true && client.closed !== true;
+    }
 
-    // fcanew-r3nz75 may hide the raw MQTT client while listenMqtt() is still
-    // delivering real events. Recent events are therefore a valid transport
-    // liveness signal and must not trigger a false reconnect.
+    // If al-fca hides its raw MQTT client while listenMqtt() is delivering
+    // real events, recent events can still prove that the transport is alive.
     const lastActivityAt = Math.max(this.lastEventAt, this.lastPingAt);
     return lastActivityAt > 0 && Date.now() - lastActivityAt < this.options.staleAfterMs;
   }
@@ -192,6 +194,7 @@ export class MqttConnectionManager extends EventEmitter {
   async _connectOnce(reason) {
     if (this.stopped || this.listener) return true;
     this.state = "RECONNECTING";
+    this.connectingStartedAt = Date.now();
     this._emitState();
 
     try {
@@ -225,9 +228,10 @@ export class MqttConnectionManager extends EventEmitter {
       this.lastErrorClass = null;
       this.connectedSince = Date.now();
       this.lastConnectAt = this.connectedSince;
-      // Keep lastEventAt current so the watchdog doesn't fire immediately;
-      // state moves to CONNECTED on the first real event from _recordEvent().
-      this.lastEventAt = this.connectedSince;
+      // A connection attempt is not transport activity; only a real socket ping
+      // or received MQTT event may advance the liveness timestamps.
+      this.lastEventAt = 0;
+      this.lastPingAt = 0;
       this.state = "CONNECTING";
       this.consecutiveErrors = 0;
       this._emitState();
@@ -324,11 +328,28 @@ export class MqttConnectionManager extends EventEmitter {
     this.listener = null;
     if (!old) return;
     this.lastDisconnectAt = Date.now();
+    const client = this._mqttClient();
+    let timeout;
+    let timedOut = false;
     try {
-      if (typeof old.stopListeningAsync === "function") await old.stopListeningAsync();
+      if (typeof old.stopListeningAsync === "function") {
+        await Promise.race([
+          old.stopListeningAsync(),
+          new Promise((resolve) => {
+            timeout = setTimeout(() => { timedOut = true; resolve(); }, this.options.stopTimeoutMs ?? 5_000);
+          }),
+        ]);
+      }
       else await old.stopListening?.();
     } catch (error) {
       this._recordError(error, "STOP_LISTENER");
+    } finally {
+      clearTimeout(timeout);
+    }
+    if (timedOut) {
+      console.warn(`[MQTT:${this.label}] ⚠️ انتهت مهلة إيقاف listener؛ إغلاق socket بالقوة قبل إعادة الاتصال`);
+      try { client?.end?.(true); } catch (_) {}
+      if (global.mqttClient === client) global.mqttClient = null;
     }
   }
 
@@ -402,10 +423,9 @@ export class MqttConnectionManager extends EventEmitter {
         const lastActivityAt = Math.max(this.lastEventAt, this.lastPingAt);
         const staleFor = Date.now() - lastActivityAt;
         // CRITICAL-03 FIX: لا تُطلق الـ watchdog أثناء CONNECTING / AUTH_FAILED / STOPPED.
-        // المشكلة السابقة: إذا استغرق handshake MQTT أكثر من initialGraceMs (دقيقتان)،
-        // كان الـ watchdog يقتل الجلسة الصحيحة لأن _socketAlive() يعيد false ريثما
-        // يُكمل fcanew-r3nz75 إعداد مُوكّل الأحداث الداخلي.
-        if (this.state === "CONNECTING" || this.state === "AUTH_FAILED" || this.state === "STOPPED") {
+        // إذا استغرق handshake MQTT أكثر من initialGraceMs (دقيقتان)، قد يقتل
+        // watchdog الجلسة الصحيحة قبل أن يكتمل إعداد listener داخل al-fca.
+        if (this.state === "CONNECTING" || this.state === "RECONNECTING" || this.state === "AUTH_FAILED" || this.state === "STOPPED") {
           return; // انتظر الدورة القادمة — المعالجات الداخلية ستُبلِّغ عن أي خطأ حقيقي
         }
         const settling = this.connectedSince > 0 &&
@@ -443,10 +463,16 @@ export class MqttConnectionManager extends EventEmitter {
         this._resetReconnectBudgetIfStable();
         this.emit("ping_ok", this.health());
       }
+      else if ((this.state === "CONNECTING" || this.state === "RECONNECTING") &&
+        Date.now() - (this.state === "RECONNECTING" ? this.connectingStartedAt : this.connectedSince) < this.options.initialGraceMs) {
+        // Let al-fca finish the initial handshake before requesting a reconnect.
+      }
       else if (this.state !== "AUTH_FAILED") {
         const recentActivity = this.lastEventAt > 0 &&
           Date.now() - this.lastEventAt < this.options.staleAfterMs;
-        if (!recentActivity) void this.reconnect("ping_failed");
+        const client = this._mqttClient();
+        const knownDisconnected = typeof client?.connected === "boolean" && !this._socketAlive();
+        if (knownDisconnected || !recentActivity) void this.reconnect("ping_failed");
       }
       this._schedulePing();
     }, this.options.pingIntervalMs);

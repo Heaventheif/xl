@@ -3,9 +3,24 @@ import path from "path";
 import { createRequire }  from "node:module";
 import { fileURLToPath }  from "node:url";
 
-// ── استيراد fcanew-r3nz75 (CJS) ─────────────────────────────────────────────────────
+// al-fca runs an updater that may npm-install a new release and exit the
+// service. Suppress only its known setImmediate updater callback at load time.
 const require = createRequire(import.meta.url);
-const fcaPackage = require("fcanew-r3nz75");
+const nativeSetImmediate = global.setImmediate;
+let fcaPackage;
+try {
+  global.setImmediate = function (callback, ...args) {
+    if (typeof callback === "function" && /checkForFCAUpdate/.test(callback.toString())) {
+      global.alfcaUpdateChecked = true;
+      return { unref() {}, hasRef() { return false; } };
+    }
+    return nativeSetImmediate.call(this, callback, ...args);
+  };
+  fcaPackage = require("al-fca");
+} finally {
+  global.setImmediate = nativeSetImmediate;
+  global.alfcaUpdateChecked = true;
+}
 const login = typeof fcaPackage === "function" ? fcaPackage : (fcaPackage.login ?? fcaPackage.default);
 
 import { readAppStateFromEnv, updateAppStateInMemory } from "../runtimeEnv.js";
@@ -73,10 +88,18 @@ export function saveAppStateForBot(state, botIndex = 1, source = "runtime") {
   }
 }
 
-// ── خيارات fcanew-r3nz75 ─────────────────────────────────────────────────────────────
+// ── خيارات al-fca ────────────────────────────────────────────────────────────────
 const GLOBAL_OPTIONS = getFcaOptions();
 
 async function initializeBot(api, index, label, replacedApi = null) {
+  // al-fca otherwise uploads every incoming photo to ImgBB in the background.
+  // Keep attachments private and let the bot handle only Facebook's original URL.
+  if (typeof api?._imgUpload === "function") api._imgUpload = async () => null;
+  if (typeof api?.uploadImageToImgbb === "function") {
+    api.uploadImageToImgbb = async () => {
+      throw new Error("External image uploads are disabled for privacy");
+    };
+  }
   if (replacedApi && replacedApi !== api) {
     try { await replacedApi.__stopSessionLifecycle?.(); } catch (_) {}
     global.botApis = (global.botApis || []).filter(item => item !== replacedApi && item?.__botIndex !== index);
@@ -105,7 +128,7 @@ export function loginBot(account) {
         console.error(`[LOGIN:${label}] ❌ AppState فشل: ${msg}`);
         return reject(new Error(msg));
       }
-      console.log(`[LOGIN:${label}] ✅ AppState نجح`);
+      console.log(`[LOGIN:${label}] ✅ AppState نجح عبر al-fca`);
       try { await initializeBot(api, index, label); resolve(api); }
       catch (e) { reject(e); }
     });

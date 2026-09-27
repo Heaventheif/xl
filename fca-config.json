@@ -10,7 +10,7 @@
     "updatePresence": false,
     "forceLogin": true,
     "autoMarkRead": false,
-    "autoReconnect": true,
+    "autoReconnect": false,
     "online": true,
     "emitReady": true,
     "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
@@ -18,7 +18,7 @@
   "session": {
     "autoSave": true,
     "saveIntervalMs": 600000,
-    "keepAliveIntervalMs": 780000,
+    "keepAliveIntervalMs": 0,
     "healthCheckIntervalMs": 1200000,
     "refreshThresholdMs": 1209600000,
     "criticalThresholdMs": 259200000

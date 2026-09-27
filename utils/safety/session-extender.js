@@ -43,7 +43,7 @@ const KEEPALIVE_AGENT = new HttpsAgent({
 export class SessionExtender extends EventEmitter {
   /**
    * @param {object}   opts
-   * @param {object}   opts.api              — كائن api من fcanew-r3nz75
+   * @param {object}   opts.api              — كائن api من al-fca
    * @param {number}   opts.botIndex
    * @param {object}   [opts.cookieRefresher]
    * @param {object}   [opts.sessionGuard]
@@ -103,8 +103,8 @@ export class SessionExtender extends EventEmitter {
     this._scheduleHealthCheck();
     this._scheduleKeepAlive();
 
-    const kaMin = Math.round(this._keepAliveMs / 60_000);
-    console.log(`[EXTENDER:${this._label}] ▶️ نشط | keep-alive ${kaMin}د | refresh ${Math.round(this._threshold / 86_400_000)}ي`);
+    const keepAliveLabel = this._keepAliveMs > 0 ? `${Math.round(this._keepAliveMs / 60_000)}د` : "معطّل";
+    console.log(`[EXTENDER:${this._label}] ▶️ نشط | keep-alive ${keepAliveLabel} | refresh ${Math.round(this._threshold / 86_400_000)}ي`);
     return this;
   }
 
@@ -134,7 +134,7 @@ export class SessionExtender extends EventEmitter {
       circuitOpen:      this._circuitOpen,
       sessionHealthy:   this._sessionHealthy,
       uptimeHours:      (uptimeMs / 3_600_000).toFixed(1),
-      keepAliveEnabled: true, // [FIX-2] دائماً مُفعَّل
+      keepAliveEnabled: this._keepAliveMs > 0,
       keepAliveIntervalMin: Math.round(this._keepAliveMs / 60_000),
     };
   }
@@ -165,7 +165,7 @@ export class SessionExtender extends EventEmitter {
   // ── جدولة keep-alive ───────────────────────────────────────────────────────
 
   _scheduleKeepAlive() {
-    if (!this._running) return;
+    if (!this._running || !(this._keepAliveMs > 0)) return;
 
     // [FIX-3] أول ping بعد 3 دقائق (ليس 60 دقيقة)
     // [FIX-6] jitter ±3 دقائق فقط (ليس ±20 دقيقة التي كانت تُتيح تجاوز عمر الجلسة)
@@ -263,6 +263,7 @@ export class SessionExtender extends EventEmitter {
    * لا يعتمد على تفاصيل داخلية غير ثابتة في FCA.
    */
   async _doKeepAlive(manual = false) {
+    if (!(this._keepAliveMs > 0)) return;
     const label = this._label;
 
     let state;
@@ -288,9 +289,10 @@ export class SessionExtender extends EventEmitter {
 
       const status = await this._fbPing(KEEPALIVE_ENDPOINT, cookieStr);
 
-      if (status < 200 || status >= 300) {
+      if (status >= 400) {
         console.warn(`[EXTENDER:${label}] ⚠️ keep-alive HTTP ${status}`);
-        // لا نُوقف — HTTP 3xx طبيعي على Facebook
+        this._recordFail(`Facebook keep-alive HTTP ${status}`);
+        return;
       }
 
       // تمديد تواريخ انتهاء الكوكيز محلياً بعد كل ping ناجح
@@ -378,12 +380,9 @@ export class SessionExtender extends EventEmitter {
       : [KEEPALIVE_ENDPOINT];
 
     for (const url of urls) {
-      try {
-        await _sleep(1_500 + Math.random() * 2_000);
-        await this._fbPing(url, cookieStr);
-      } catch (e) {
-        console.warn(`[EXTENDER:${label}] ⚠️ warmup axios [${url}]: ${e.message}`);
-      }
+      await _sleep(1_500 + Math.random() * 2_000);
+      const status = await this._fbPing(url, cookieStr);
+      if (status >= 400) throw new Error(`Facebook warmup HTTP ${status} (${url})`);
     }
   }
 

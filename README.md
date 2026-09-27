@@ -1,6 +1,6 @@
 # SunkenBot
 
-> A modular Facebook Messenger bot built for Node.js 20+, with FCA/MQTT session management, MongoDB persistence, media utilities, resilient HTTP clients, and a large command/event ecosystem.
+> A modular Facebook Messenger bot built for Node.js 22.19+, using the pinned `al-fca` client, MQTT session management, MongoDB persistence, media utilities, and resilient HTTP clients.
 
 ## Overview
 
@@ -22,7 +22,7 @@ The application starts from `index.js`.
 
 ## Requirements
 
-- **Node.js:** `>= 20`
+- **Node.js:** `>= 22.19.0` (`al-fca` depends on `undici` 8)
 - **npm:** compatible with your Node.js installation
 - **MongoDB:** recommended for persistent database-backed features
 - A valid **Facebook AppState** for the FCA login flow
@@ -136,12 +136,13 @@ Important fields:
 
 FCA and session behavior are configured separately.
 
+The bot uses `al-fca@2.0.3` (pinned) through a compatibility adapter so existing commands keep their current method names and callback results.
+
 Important defaults include:
 
-- Automatic MQTT reconnect.
+- MQTT watchdog/reconnect managed by the bot (the library's reconnect loop is disabled to avoid competing listeners).
 - MQTT watchdog and ping intervals.
 - AppState auto-save.
-- Session keep-alive.
 - Session health checks.
 - AppState refresh/expiry thresholds.
 
@@ -149,12 +150,12 @@ The project currently uses:
 
 ```text
 Timezone:              Europe/Berlin
-Session keep-alive:    13 minutes
-MQTT auto-reconnect:   enabled
+Session keep-alive:    disabled (Render returned HTTP 400; failed pings must not extend cookie expiry locally)
+MQTT auto-reconnect:   enabled through the bot watchdog only
 MQTT watchdog:         enabled
 ```
 
-The keep-alive implementation uses an HTTP agent with connection reuse and consumes the response as a stream, avoiding unnecessary response buffering.
+AppState persistence and session health checks remain active. The package's automatic npm updater is suppressed so a running Render instance cannot change dependencies and restart itself. Its implicit ImgBB photo re-upload is also disabled to keep incoming photo attachments from being forwarded to a third party.
 
 ---
 

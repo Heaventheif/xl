@@ -1,21 +1,5 @@
-import { createRequire } from "node:module";
 import { getMqttConfig, getSessionConfig } from "../fcaConfig.js";
 import { callFcaApi } from "./fcaApi.js";
-const _require = createRequire(import.meta.url);
-
-// ── تحميل attachThreadInfoRealtimeSync من fcanew-r3nz75 ─────────────────────────────
-let _attachThreadInfoRealtimeSync = null;
-try {
-  const fcaNx = _require("fcanew-r3nz75");
-  _attachThreadInfoRealtimeSync =
-    fcaNx.attachThreadInfoRealtimeSync ??
-    fcaNx.default?.attachThreadInfoRealtimeSync ??
-    null;
-  if (_attachThreadInfoRealtimeSync)
-    console.log("[BOT-INIT] ✅ attachThreadInfoRealtimeSync محمَّل من fcanew-r3nz75");
-} catch (e) {
-  console.warn("[BOT-INIT] ⚠️ تعذَّر تحميل attachThreadInfoRealtimeSync:", e.message);
-}
 
 // ── botEnhancer (اختياري) ─────────────────────────────────────────────────────
 let _botEnhancerFn = null;
@@ -74,31 +58,26 @@ export async function startMqttListener(api, opts = {}) {
     console.warn(`[MQTT:${label}] ⏳ cooldown حتى ${h.cooldownUntil}`));
   // FIX-DTSG: تجديد fb_dtsg بعد كل MQTT reconnect ناجح
   // fb_dtsg token ضروري لكل طلب POST — قد يتقادم بعد انقطاع الاتصال
-  // FIX-DTSG: تجديد fb_dtsg بعد كل MQTT reconnect ناجح
-  // fb_dtsg token ضروري لكل طلب POST — قد يتقادم بعد انقطاع الاتصال
   manager.on("connected", ({ reason }) => {
     if (reason === "initial") return; // الأول لا يحتاج تجديد
-    setTimeout(async () => {
+    const refreshTimer = setTimeout(async () => {
       try {
-        const extender = api._sessionExtender;
-        if (extender && typeof extender.pingNow === "function") {
-          await extender.pingNow();
-          console.log(`[MQTT:${label}] 🔄 fb_dtsg جُدِّد بعد reconnect (${reason})`);
-        } else if (typeof api.refreshFb_dtsg === "function") {
+        if (typeof api.refreshFb_dtsg === "function") {
           await api.refreshFb_dtsg();
-          console.log(`[MQTT:${label}] 🔄 fb_dtsg جُدِّد (مباشر) بعد reconnect`);
+          console.log(`[MQTT:${label}] 🔄 fb_dtsg جُدِّد عبر al-fca بعد reconnect (${reason})`);
         } else if (typeof api.refreshFbDtsg === "function") {
           await api.refreshFbDtsg();
-          console.log(`[MQTT:${label}] 🔄 fb_dtsg جُدِّد بعد reconnect`);
+          console.log(`[MQTT:${label}] 🔄 fb_dtsg جُدِّد بعد reconnect (${reason})`);
         }
       } catch (err) {
         console.warn(`[MQTT:${label}] ⚠️ تعذَّر تجديد fb_dtsg:`, err.message);
       }
     }, 3000); // انتظار 3 ثوانٍ للتأكد من استقرار الجلسة
+    refreshTimer.unref?.();
   });
 
   manager.start();
-  console.log(`[SUCCESS] ${label} مدير MQTT نشط (fcanew-r3nz75)`);
+  console.log(`[SUCCESS] ${label} مدير MQTT نشط (al-fca)`);
   return manager;
 }
 
@@ -141,7 +120,7 @@ export async function initBotLifecycle(api, botIndex, opts = {}) {
     });
   } catch (_) {}
 
-  console.log(`[LOGIN:${label}] ✅ الاتصال بفيسبوك مستقر (fcanew-r3nz75)`);
+  console.log(`[LOGIN:${label}] ✅ تم تسجيل الدخول عبر al-fca`);
 
   // ── تسجيل global ─────────────────────────────────────────────────────────
   global.botApis = (global.botApis || []).filter(item => item !== api && item?.__botIndex !== botIndex);
@@ -165,20 +144,6 @@ export async function initBotLifecycle(api, botIndex, opts = {}) {
       }
     } catch (e) { console.warn(`[NAME:${label}] ⚠️`, e.message); }
   })();
-
-  // ── Thread-info realtime sync (من fcanew-r3nz75) ────────────────────────────────
-  // fcanew-r3nz75 expects (ctx, models, logger, api). The app currently
-  // has no Sequelize Thread model, so never call it with the raw api alone.
-  const threadModels = global.fcaThreadModels;
-  if (typeof _attachThreadInfoRealtimeSync === "function" && threadModels) {
-    try {
-      const syncContext = { api };
-      const syncLogger = (message, level = "warn") =>
-        console[level === "error" ? "error" : "warn"](`[SYNC:${label}] ${message}`);
-      const attached = _attachThreadInfoRealtimeSync(syncContext, threadModels, syncLogger, api);
-      if (attached) console.log(`[SYNC:${label}] ✅ Thread-info realtime sync نشط (fcanew-r3nz75)`);
-    } catch (e) { console.warn(`[SYNC:${label}] ⚠️`, e.message); }
-  }
 
   // ── botEnhancer ───────────────────────────────────────────────────────────
   try { _botEnhancerFn?.(); } catch (_) {}

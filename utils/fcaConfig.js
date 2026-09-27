@@ -18,14 +18,14 @@ const DEFAULTS = {
     updatePresence: false,
     forceLogin: false,
     autoMarkRead: false,
-    autoReconnect: true,
+    autoReconnect: false,
     online: true,
     emitReady: false
   },
   session: {
     autoSave: true,
     saveIntervalMs: 10 * 60 * 1000,
-    keepAliveIntervalMs: 13 * 60 * 1000,
+    keepAliveIntervalMs: 0,
     healthCheckIntervalMs: 20 * 60 * 1000,
     refreshThresholdMs: 14 * 24 * 60 * 60 * 1000,
     criticalThresholdMs: 3 * 24 * 60 * 60 * 1000
@@ -66,7 +66,8 @@ export function getFcaConfig() {
 
 export function getFcaOptions() {
   const config = getFcaConfig();
-  return { ...DEFAULTS.options, ...(config.options || {}), autoReconnect: config.mqtt?.autoReconnect !== false && config.options?.autoReconnect !== false };
+  // The app watchdog owns reconnection; enabling both loops causes MQTT races.
+  return { ...DEFAULTS.options, ...(config.options || {}), autoReconnect: false };
 }
 
 export function getSessionConfig() { return getFcaConfig().session; }
