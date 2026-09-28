@@ -150,12 +150,15 @@ The project currently uses:
 
 ```text
 Timezone:              Europe/Berlin
-Session keep-alive:    disabled (Render returned HTTP 400; failed pings must not extend cookie expiry locally)
+Render HTTP heartbeat: GET /health every 13 minutes (uses RENDER_EXTERNAL_URL; Render only)
+Facebook session ping: disabled (previous Facebook keep-alive returned HTTP 400)
 MQTT auto-reconnect:   enabled through the bot watchdog only
 MQTT watchdog:         enabled
 ```
 
-AppState persistence and session health checks remain active. The package's automatic npm updater is suppressed so a running Render instance cannot change dependencies and restart itself. Its implicit ImgBB photo re-upload is also disabled to keep incoming photo attachments from being forwarded to a third party.
+AppState persistence and session health checks remain active. The Render heartbeat is a separate GET to the bot's public `/health` endpoint; it does not send cookies or call Facebook. On Render Free, it is a best-effort way to reset the 15-minute idle timer, not a 24/7 uptime guarantee: Render documents a 750 Free instance-hour monthly allowance per workspace, and a continuously running 31-day month uses about 744 hours. Render may restart Free services at any time and says Free instances are not for production. See [Render's Free instance limits](https://render.com/docs/free) and [default environment variables](https://render.com/docs/environment-variables).
+
+The package's automatic npm updater is suppressed so a running Render instance cannot change dependencies and restart itself. Its implicit ImgBB photo re-upload is also disabled to keep incoming photo attachments from being forwarded to a third party.
 
 ---
 

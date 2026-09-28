@@ -12,6 +12,7 @@ import { PROJECT_ROOT, loadAppState, loginBot, stopCleanupInterval } from "./uti
 import { cleanupOrphanTempFiles } from "./utils/tempCleanup.js";
 import "./utils/safeSend.js";
 import webServer from "./webserver.js";
+import { startRenderKeepAlive } from "./utils/core/renderKeepAlive.js";
 
 const reactionTimestamps = new Map();
 const reactionListener = new Proxy({}, {
@@ -49,6 +50,8 @@ global.log = {
   success: (message, context) => logger.info(message, { status: "success", ...context })
 };
 
+const stopRenderKeepAlive = startRenderKeepAlive();
+
 checkEnv(PROJECT_ROOT);
 loadConfig(PROJECT_ROOT);
 const commandsDir = path.join(PROJECT_ROOT, "cmds");
@@ -75,6 +78,7 @@ let shuttingDown = false;
 for (const signal of ["SIGTERM", "SIGINT"]) process.on(signal, async () => {
   if (shuttingDown) return;
   shuttingDown = true;
+  stopRenderKeepAlive();
   try { stopCleanupInterval(); } catch (_) {}
   try { await global.botApi?.__stopSessionLifecycle?.(); } catch (_) {}
   for (const api of global.botApis || []) {
