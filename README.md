@@ -543,3 +543,11 @@ Third-party services, APIs, authentication systems, and platform behavior can ch
 **SunkenBot**
 
 For issues and feature requests, use the project's issue tracker or repository discussions.
+
+## مكتبة fca (al-fca المعدّلة)
+
+يستخدم المشروع نسخة معدّلة من al-fca موجودة في `vendor/al-fca` (تُثبَّت عبر `"al-fca": "file:vendor/al-fca"`).
+- بلا تحديث تلقائي، وبلا رفع صور إلى جهات خارجية.
+- `fca-config.json` يعمل كما هو: `autoReconnect` يبقى `false` ومدير `MqttConnectionManager` هو المسؤول الوحيد عن إعادة الاتصال.
+- محاكاة الكتابة والفواصل تبقى في `safeSend.js` و`bot-enhancer.js`؛ خيار `humanize` في المكتبة معطّل افتراضياً حتى لا يتضاعف التأخير.
+- بعد نسخ المشروع نفّذ `npm install` مرة واحدة (أو `npm ci`) لتثبيت الاعتماديات.

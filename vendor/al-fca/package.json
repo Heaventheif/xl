@@ -1,0 +1,42 @@
+{
+  "name": "al-fca",
+  "version": "2.1.0",
+  "description": "AL-FCA — Unofficial Facebook Chat API ",
+  "main": "index.js",
+  "files": [
+    "src/",
+    "e2ee/",
+    "index.js",
+    "utils.js",
+    "e2eebot.js",
+    "docs/E2EE_GUIDE.md",
+    "!e2ee/**/*.map",
+    "!e2ee/**/*.ts",
+    "!config.json",
+  ],
+  "scripts": {
+    "test": "node --test \"test/*.test.js\"",
+    "start": "node index.js",
+    "build:e2ee": "node scripts/build-e2ee.js"
+  },
+  "dependencies": {
+    "@signalapp/libsignal-client": "0.70.0",
+    "axios": "^1.8.4",
+    "bluebird": "^3.7.2",
+    "chalk": "^4.1.2",
+    "cheerio": "^1.0.0-rc.10",
+    "gradient-string": "^2.0.2",
+    "https-proxy-agent": "^7.0.6",
+    "mime": "^3.0.0",
+    "mqtt": "^5.10.1",
+    "protobufjs": "^8.0.1",
+    "request": "^2.88.2",
+    "ws": "^8.18.1"
+  },
+  "directories": {
+    "test": "test"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

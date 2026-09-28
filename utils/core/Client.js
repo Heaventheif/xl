@@ -3,24 +3,10 @@ import path from "path";
 import { createRequire }  from "node:module";
 import { fileURLToPath }  from "node:url";
 
-// al-fca runs an updater that may npm-install a new release and exit the
-// service. Suppress only its known setImmediate updater callback at load time.
+// al-fca is vendored in ./vendor/al-fca (see package.json). This build has no
+// auto-updater and no external image upload, so nothing needs to be patched at load.
 const require = createRequire(import.meta.url);
-const nativeSetImmediate = global.setImmediate;
-let fcaPackage;
-try {
-  global.setImmediate = function (callback, ...args) {
-    if (typeof callback === "function" && /checkForFCAUpdate/.test(callback.toString())) {
-      global.alfcaUpdateChecked = true;
-      return { unref() {}, hasRef() { return false; } };
-    }
-    return nativeSetImmediate.call(this, callback, ...args);
-  };
-  fcaPackage = require("al-fca");
-} finally {
-  global.setImmediate = nativeSetImmediate;
-  global.alfcaUpdateChecked = true;
-}
+const fcaPackage = require("al-fca");
 const login = typeof fcaPackage === "function" ? fcaPackage : (fcaPackage.login ?? fcaPackage.default);
 
 import { readAppStateFromEnv, updateAppStateInMemory } from "../runtimeEnv.js";
@@ -92,14 +78,6 @@ export function saveAppStateForBot(state, botIndex = 1, source = "runtime") {
 const GLOBAL_OPTIONS = getFcaOptions();
 
 async function initializeBot(api, index, label, replacedApi = null) {
-  // al-fca otherwise uploads every incoming photo to ImgBB in the background.
-  // Keep attachments private and let the bot handle only Facebook's original URL.
-  if (typeof api?._imgUpload === "function") api._imgUpload = async () => null;
-  if (typeof api?.uploadImageToImgbb === "function") {
-    api.uploadImageToImgbb = async () => {
-      throw new Error("External image uploads are disabled for privacy");
-    };
-  }
   if (replacedApi && replacedApi !== api) {
     try { await replacedApi.__stopSessionLifecycle?.(); } catch (_) {}
     global.botApis = (global.botApis || []).filter(item => item !== replacedApi && item?.__botIndex !== index);
