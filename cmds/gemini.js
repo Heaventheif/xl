@@ -58,7 +58,7 @@ async function callVision(imageUrl, ext, prompt) {
         ext: ext || "jpg",
         prompt: prompt || ""
     }, {
-        timeout: 45e3,
+        timeout: 90e3,
         headers: {
             "Content-Type": "application/json",
             "X-Internal-Token": getInternalToken()
@@ -66,6 +66,18 @@ async function callVision(imageUrl, ext, prompt) {
     });
     if (!data.reply) throw new Error(data?.error || "استجابة فارغة");
     return data;
+}
+
+function visionErrorMessage(error) {
+    const status = error?.response?.status;
+    const details = error?.response?.data?.error || error.message || "خطأ غير معروف";
+    if ([ 502, 503, 504 ].includes(status)) {
+        return "❌ Gemini مشغول حالياً رغم محاولات الاستعادة التلقائية. أعد المحاولة بعد قليل، أو استخدم .groq مع الصورة.";
+    }
+    if (status === 429) {
+        return "❌ وصلت Gemini إلى حد الطلبات المؤقت. انتظر قليلاً ثم أعد المحاولة، أو استخدم .groq مع الصورة.";
+    }
+    return `❌ تعذّر تحليل الصورة${status ? ` (${status})` : ""}: ${String(details).slice(0, 300)}`;
 }
 
 async function callSearch(query) {
@@ -105,8 +117,9 @@ async function handleVision(api, event, prompt, registerReply) {
     try {
         result = await callVision(att.url, att.ext, `[${senderDisplayName}]: ${question}`);
     } catch (e) {
-        console.error("[VISION→HF]", e.response?.status, e.message?.substring(0, 100));
-        return global.safeSend(api, `❌ فشل تحليل الصورة: ${e.message}`, threadID, null, messageID);
+        const details = e.response?.data?.error || e.message;
+        console.error("[VISION→HF]", e.response?.status, String(details || "").substring(0, 300));
+        return global.safeSend(api, visionErrorMessage(e), threadID, null, messageID);
     }
     const sources = formatSources(result.sources);
     const fullReply = `🖼️ ${result.reply}${sources}`;
