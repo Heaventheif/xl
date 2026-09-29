@@ -4,6 +4,15 @@ import { checkAuth } from "../middleware/auth.js";
 import { checkAndSetCooldown } from "../middleware/cooldown.js";
 import timing from "../timing.js";
 import { callFcaApi } from "./fcaApi.js";
+import { logger } from "../resilience.js";
+
+function safeErrorSummary(error) {
+  return String(error?.message || error || "Unknown error")
+    .replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [redacted]")
+    .replace(/(token|api[_-]?key|authorization|cookie|password)\s*[:=]\s*[^\s,;]+/gi, "$1=[redacted]")
+    .replace(/https?:\/\/[^\s]+/gi, "[url]")
+    .slice(0, 300);
+}
 
 // ─── Thread info cache ──────────────────────────────────────────
 const threadInfoCache = new Map();
@@ -85,8 +94,23 @@ export const handleMessage = async (rawApi, event) => {
         (cmdForReply?.onReply ? (...a) => cmdForReply.onReply(...a) : null);
       if (typeof handler === "function") {
         const replyMessage = buildMessageAPI(api, threadID, undefined);
-        Promise.resolve(handler({ api, event, message: replyMessage, Reply: replyData }))
-          .catch(e => console.error("[REPLY ERROR]", e.message));
+        const replyContext = {
+          command: replyData.commandName || cmdForReply?.config?.name || "reply-handler",
+          commandType: "reply",
+          threadID: String(threadID),
+          senderID: String(senderID),
+        };
+        const startedAt = Date.now();
+        logger.info("command reply started", replyContext);
+        Promise.resolve()
+          .then(() => handler({ api, event, message: replyMessage, Reply: replyData }))
+          .then(() => logger.info("command reply succeeded", { ...replyContext, durationMs: Date.now() - startedAt }))
+          .catch(error => logger.error("command reply failed", {
+            ...replyContext,
+            durationMs: Date.now() - startedAt,
+            errorName: error?.name || "Error",
+            error: safeErrorSummary(error),
+          }));
       }
     }
     return;
@@ -147,17 +171,39 @@ export const handleMessage = async (rawApi, event) => {
     return;
   }
   const timer = timing.start(`command:${commandName}`);
+  const fn = HANDLER_KEYS.map(key => command[key]).find(fn => typeof fn === "function");
+  const logContext = {
+    command: command.config?.name || commandName,
+    alias: commandName,
+    threadID: String(threadID),
+    senderID: String(senderID),
+    botIndex: _botIndex,
+  };
+  if (!fn) {
+    logger.error("command handler missing", logContext);
+    timer.end("(بدون معالج)");
+    return;
+  }
+  const startedAt = Date.now();
+  logger.info("command started", logContext);
   try {
     const ctx = buildCommandContext({ api, event, args, role, prefix: matchedPrefix, isGroupAdmin });
-    const fn = HANDLER_KEYS.map(key => command[key]).find(fn => typeof fn === "function");
-    if (fn) await fn(ctx);
+    await fn(ctx);
     timer.end();
     global.perfManager?.trackRequest(Date.now() - (event.timestamp || Date.now()));
+    logger.info("command succeeded", { ...logContext, durationMs: Date.now() - startedAt });
   } catch (err) {
     timer.end("(فشل)");
     global.perfManager?.trackError();
-    console.error(`[command:${commandName}]`, err.message);
-    try { api.sendMessage("⚠️ حدث خطأ أثناء تنفيذ الأمر.", threadID, null, replyTargetID); } catch (_) {}
+    logger.error("command failed", {
+      ...logContext,
+      durationMs: Date.now() - startedAt,
+      errorName: err?.name || "Error",
+      error: safeErrorSummary(err),
+    });
+    if (!err?.userNotified) {
+      try { api.sendMessage("⚠️ حدث خطأ أثناء تنفيذ الأمر.", threadID, null, replyTargetID); } catch (_) {}
+    }
   }
 };
 export const handleReaction = (api, event) => {
@@ -167,8 +213,14 @@ export const handleReaction = (api, event) => {
   if (!entry) return;
   if (entry.author && event.userID !== entry.author) return;
   global._reactionTimestamps.set(msgID, Date.now());
-  Promise.resolve(entry.callback({ api, event }))
-    .catch(e => console.error("[REACTION ERR]", e.message));
+  Promise.resolve()
+    .then(() => entry.callback({ api, event }))
+    .catch(error => logger.error("reaction callback failed", {
+      threadID: String(event.threadID || ""),
+      messageID: String(msgID),
+      errorName: error?.name || "Error",
+      error: safeErrorSummary(error),
+    }));
 };
 export const handleEvent = async (rawApi, event) => {
   if (!event.isGroup) return;
@@ -182,8 +234,15 @@ export const handleEvent = async (rawApi, event) => {
     if (!event.messageID || (!event.body && !hasAtt)) continue;
     // تجاهل إذا كانت الرسالة تُطلق هذا الأمر بالذات (اسماً أو alias أو nonPrefix)
     if (resolvedCmd && resolvedCmd === cmd) continue;
-    Promise.resolve(cmd.onChat({ api, event, message: buildMessageAPI(api, event.threadID, event.messageID) }))
-      .catch(() => {});
+    Promise.resolve()
+      .then(() => cmd.onChat({ api, event, message: buildMessageAPI(api, event.threadID, event.messageID) }))
+      .catch(error => logger.error("event command failed", {
+        command: cmd.config?.name || cmd.name || "event-command",
+        threadID: String(event.threadID),
+        senderID: String(event.senderID),
+        errorName: error?.name || "Error",
+        error: safeErrorSummary(error),
+      }));
   }
 };
 
