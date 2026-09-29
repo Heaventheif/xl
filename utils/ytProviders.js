@@ -159,17 +159,65 @@ const ccProjectProvider = {
 // Vreden is primary, followed by the previous XL provider and the same stream fallback as F.
 export const providers = [vredenProvider, engineProvider, ytDlpStreamProvider, ccProjectProvider];
 
-export async function searchWithFallback(query, limit = 10) {
-  const errors = [];
-  for (const provider of providers) {
-    if (typeof provider.search !== "function") continue;
-    try {
-      return await provider.search(query, limit);
-    } catch (error) {
-      errors.push(`${provider.name}: ${error?.message || error}`);
-    }
+const SEARCH_CACHE_TTL_MS = 3 * 60 * 1000;
+const MAX_SEARCH_CACHE_ENTRIES = 100;
+const searchCache = new Map();
+const pendingSearches = new Map();
+
+function cloneResults(results) {
+  return results.map(result => ({ ...result }));
+}
+
+function readSearchCache(key) {
+  const entry = searchCache.get(key);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    searchCache.delete(key);
+    return null;
   }
-  throw new Error(errors.join(" | ") || "تعذّر البحث عبر جميع المزوّدين");
+  searchCache.delete(key);
+  searchCache.set(key, entry);
+  return cloneResults(entry.results);
+}
+
+function writeSearchCache(key, results) {
+  if (searchCache.size >= MAX_SEARCH_CACHE_ENTRIES) {
+    searchCache.delete(searchCache.keys().next().value);
+  }
+  searchCache.set(key, {
+    results: cloneResults(results),
+    expiresAt: Date.now() + SEARCH_CACHE_TTL_MS,
+  });
+}
+
+export async function searchWithFallback(query, limit = 10) {
+  const normalizedQuery = String(query || "").trim().replace(/\s+/g, " ").toLowerCase();
+  const normalizedLimit = Math.max(1, Number(limit) || 10);
+  const cacheKey = `${normalizedLimit}:${normalizedQuery}`;
+  const cached = readSearchCache(cacheKey);
+  if (cached) return cached;
+  if (pendingSearches.has(cacheKey)) return cloneResults(await pendingSearches.get(cacheKey));
+
+  const pending = (async () => {
+    const errors = [];
+    for (const provider of providers) {
+      if (typeof provider.search !== "function") continue;
+      try {
+        const results = await provider.search(query, limit);
+        if (Array.isArray(results) && results.length) writeSearchCache(cacheKey, results);
+        return results;
+      } catch (error) {
+        errors.push(`${provider.name}: ${error?.message || error}`);
+      }
+    }
+    throw new Error(errors.join(" | ") || "تعذّر البحث عبر جميع المزوّدين");
+  })();
+  pendingSearches.set(cacheKey, pending);
+  try {
+    return cloneResults(await pending);
+  } finally {
+    if (pendingSearches.get(cacheKey) === pending) pendingSearches.delete(cacheKey);
+  }
 }
 
 export async function downloadWithFallback(url, wantMp4) {

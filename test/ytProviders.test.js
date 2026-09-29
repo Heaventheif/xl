@@ -66,3 +66,33 @@ test("downloads try Vreden first, normalize the YouTube URL, then fall back sequ
     restoreProviderMethods(saved);
   }
 });
+
+test("identical searches are coalesced and cached without sharing mutable result objects", async () => {
+  const saved = saveProviderMethods();
+  const query = `cache-regression-${Date.now()}`;
+  const calls = [];
+  try {
+    providers[0].search = async (_query, limit) => {
+      calls.push(limit);
+      await new Promise(resolve => setTimeout(resolve, 20));
+      return [{ url: "https://www.youtube.com/watch?v=cachetest", title: "Original", limit }];
+    };
+    for (const provider of providers.slice(1)) {
+      provider.search = async () => { throw new Error("fallback should not be called"); };
+    }
+
+    const [first, concurrent] = await Promise.all([
+      searchWithFallback(query, 1),
+      searchWithFallback(query, 1),
+    ]);
+    assert.equal(calls.length, 1);
+    assert.deepEqual(first, concurrent);
+
+    first[0].title = "mutated";
+    const cached = await searchWithFallback(query, 1);
+    assert.equal(calls.length, 1);
+    assert.equal(cached[0].title, "Original");
+  } finally {
+    restoreProviderMethods(saved);
+  }
+});

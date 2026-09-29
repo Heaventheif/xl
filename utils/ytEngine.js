@@ -4,7 +4,7 @@ import path from "path";
 import { randomUUID } from "node:crypto";
 import { pipeline } from "node:stream/promises";
 import http from "./fetchHttp.js";
-import { getYozoraInfo, getYozoraEntries, getYozoraTitle, buildYozoraDownloadUrl } from "./yozora.js";
+import { getYozoraInfo, getYozoraEntries, buildYozoraDownloadUrl } from "./yozora.js";
 import * as cache from "./cache.js";
 
 export function extractYoutubeVideoId(raw) {
@@ -55,7 +55,7 @@ export async function searchVideos(query, limit = 10) {
     const cacheKey = `yt_search:yozora:${query.toLowerCase()}:${limit}`;
     const cached = cache.get(cacheKey);
     if (cached) return cached;
-    const info = await getYozoraInfo(`ytsearch${Math.max(1, limit)}:${query}`);
+    const info = await getYozoraInfo(`ytsearch${Math.max(1, limit)}:${query}`, undefined, 15_000);
     const results = getYozoraEntries(info, limit).map(item => ({
         ...item,
         duration: item.duration || fmtDur(0)
@@ -67,14 +67,13 @@ export async function searchVideos(query, limit = 10) {
 
 async function downloadFromYozora(ytUrl, format, suffix, fallbackTitle) {
     const normalized = normalizeYoutubeUrl(ytUrl);
-    const info = await getYozoraInfo(normalized, format);
     const filePath = path.join(os.tmpdir(), `yt_${suffix}_${Date.now()}_${randomUUID()}.${suffix}`);
     await streamToFile(buildYozoraDownloadUrl(normalized, format), filePath);
     return {
         filePath,
-        title: getYozoraTitle(info, fallbackTitle),
-        duration: Number(info?.duration) || 0,
-        uploader: info?.uploader || info?.channel || ""
+        title: fallbackTitle,
+        duration: 0,
+        uploader: ""
     };
 }
 
