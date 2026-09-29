@@ -87,6 +87,24 @@ test("does not report a known-disconnected MQTT socket as healthy from stale act
   }
 });
 
+test("logs the trigger and socket state when MQTT reconnection is requested", async () => {
+  const manager = new MqttConnectionManager({ _mqttClient: { connected: false } });
+  const originalWarn = console.warn;
+  let logMessage = "";
+  console.warn = (message) => { logMessage = String(message); };
+  manager.stopped = false;
+
+  try {
+    const reconnect = manager.reconnect("ping_failed");
+    assert.match(logMessage, /reason=ping_failed/);
+    assert.match(logMessage, /socketConnected=false/);
+    await manager.stop();
+    await reconnect;
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
 test("a hung al-fca listener stop times out and force-closes its socket", async () => {
   const previous = global.mqttClient;
   let forcedClosed = false;

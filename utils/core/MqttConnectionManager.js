@@ -121,6 +121,16 @@ export class MqttConnectionManager extends EventEmitter {
     if (this.stopped) return false;
     if (this.reconnectPromise) return this.reconnectPromise;
     this.lastReconnectReason = reason;
+    const now = Date.now();
+    const lastActivityAt = Math.max(this.lastEventAt, this.lastPingAt);
+    const client = this._mqttClient();
+    const socketConnected = typeof client?.connected === "boolean" ? client.connected : "unknown";
+    const activityAgeMs = lastActivityAt ? now - lastActivityAt : "never";
+    console.warn(
+      `[MQTT:${this.label}] reconnect requested reason=${reason} state=${this.state} ` +
+      `socketConnected=${socketConnected} activityAgeMs=${activityAgeMs} ` +
+      `consecutiveErrors=${this.consecutiveErrors}`
+    );
     this.reconnectPromise = this._reconnect(reason).finally(() => {
       this.reconnectPromise = null;
     });
