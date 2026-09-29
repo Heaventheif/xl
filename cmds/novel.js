@@ -177,6 +177,7 @@ async function translateBatchCached(cacheKey, paragraphs) {
 }
 
 async function fetchHTML(url) {
+    const isChallengeHTML = html => /just a moment|checking your browser|cf-chl-|challenge-platform|attention required\s*\|?\s*cloudflare|verify you are human/i.test(String(html || "").slice(0, 6e3));
     const attempts = [ {
         url: url,
         headers: BROWSER_HEADERS(),
@@ -198,13 +199,53 @@ async function fetchHTML(url) {
             if (res.status >= 400) continue;
             const html = typeof res.data === "string" ? res.data : String(res.data);
             if (html.length < 500) continue;
-            const lower = html.substring(0, 3e3).toLowerCase();
-            if (lower.includes("just a moment") || lower.includes("cloudflare")) continue;
+            if (isChallengeHTML(html)) continue;
             if (a.proxyRef) a.proxyRef.successCount += 1;
             return html;
         } catch (_) {}
     }
     throw new Error("فشلت جميع المحاولات");
+}
+
+function parseChapterInput(raw) {
+    const value = String(raw || "").trim();
+    if (!/^\d+(?:\.\d+)?$/.test(value)) return null;
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 && number <= 1e5 ? number : null;
+}
+
+function novelFullIndexPages(chapterNum) {
+    const number = Number(chapterNum);
+    if (!Number.isFinite(number) || number <= 0 || number > 1e5) return [];
+    const center = Math.max(1, Math.ceil(number / 50));
+    return [...new Set([center, center + 1, center - 1, center + 2, center - 2, 1].filter(page => page > 0))];
+}
+
+function buildNovelFullIndexUrl(indexUrl, page) {
+    const url = new URL(indexUrl);
+    url.searchParams.set("page", String(page));
+    url.searchParams.set("per-page", "50");
+    return url.href;
+}
+
+function findNovelFullChapterUrl($, requestedChapter) {
+    const target = Number(requestedChapter);
+    if (!Number.isFinite(target) || target <= 0) return null;
+    let chapterUrl = null;
+    $("a[href]").each((_, el) => {
+        const labels = [$(el).text(), $(el).attr("title") || ""].join(" ");
+        const matches = [...labels.matchAll(/\bchapter\s*(\d+(?:\s*\.\s*\d+)?)/ig)];
+        if (!matches.some(match => Number(match[1].replace(/\s+/g, "")) === target)) return;
+        const href = $(el).attr("href");
+        if (!href) return;
+        try {
+            const candidate = new URL(href, "https://novelfull.com/");
+            if (candidate.protocol !== "https:" || !/(^|\.)novelfull\.com$/i.test(candidate.hostname)) return;
+            chapterUrl = candidate.href;
+            return false;
+        } catch (_) {}
+    });
+    return chapterUrl;
 }
 
 function extractContent($, selectors) {
@@ -297,29 +338,17 @@ async function fetchFromFallback(site, novelName, chapterNum) {
         ({url: url, html: html, $: $} = resolved);
     } else if (site.name === "NovelFull") {
         const indexUrl = site.indexUrl(slug);
-        const indexHtml = await fetchHTML(indexUrl);
+        const indexHtml = await fetchHTML(buildNovelFullIndexUrl(indexUrl, 1));
         const $idx = cheerio.load(indexHtml);
-        const chPattern = new RegExp(`/chapter-${chapterNum}[^"']*\\.html`, "i");
-        let chapterUrl = null;
-        $idx("a[href]").each(((_, el) => {
-            const href = $idx(el).attr("href") || "";
-            if (chPattern.test(href)) {
-                chapterUrl = href.startsWith("http") ? href : `https://novelfull.com${href}`;
-                return false;
-            }
-        }));
+        let chapterUrl = findNovelFullChapterUrl($idx, chapterNum);
         if (!chapterUrl) {
-            for (let page = 1; page <= 5 && !chapterUrl; page++) {
+            for (const page of novelFullIndexPages(chapterNum)) {
+                if (chapterUrl) break;
+                if (page === 1) continue;
                 try {
-                    const pageHtml = await fetchHTML(`${indexUrl}?page=${page}`);
+                    const pageHtml = await fetchHTML(buildNovelFullIndexUrl(indexUrl, page));
                     const $p = cheerio.load(pageHtml);
-                    $p("a[href]").each(((_, el) => {
-                        const href = $p(el).attr("href") || "";
-                        if (chPattern.test(href)) {
-                            chapterUrl = href.startsWith("http") ? href : `https://novelfull.com${href}`;
-                            return false;
-                        }
-                    }));
+                    chapterUrl = findNovelFullChapterUrl($p, chapterNum);
                 } catch (_) {}
             }
         }
@@ -432,7 +461,7 @@ async function verifyTranslation(paragraphs) {
     return verified;
 }
 
-const JS_SITES = [ "NovelHi", "WtrLab", "Freewebnovel" ];
+const JS_SITES = [ "Freewebnovel", "NovelFull" ];
 
 class NeedsSelectionError extends Error {
     constructor(candidates, site) {
@@ -442,12 +471,13 @@ class NeedsSelectionError extends Error {
     }
 }
 
-async function fetchFromJsSitesBridge(novelName, chapterNum) {
+async function fetchFromJsSitesBridge(novelName, chapterNum, site) {
     const HF_API = getHfBaseOrNull();
     if (!HF_API) throw new Error("HF_SPACE_URL غير مضبوط");
     const res = await http.post(`${HF_API}/novel`, {
         novel: novelName,
-        chapter: chapterNum
+        chapter: chapterNum,
+        site
     }, {
         timeout: 6e4,
         headers: {
@@ -492,10 +522,8 @@ export default {
             return global.safeSend(api, "📚 الاستخدام: .novel [اسم الرواية] [رقم الفصل]\n💡 مثال: .novel martial peak 1", threadID, null, messageID);
         }
         const lastArg = args[args.length - 1];
-        if (isNaN(lastArg) || Number(lastArg) < 1) {
-            return global.safeSend(api, "❌ يجب أن يكون آخر شيء في الأمر رقم الفصل\n💡 مثال: .novel martial peak 1", threadID, null, messageID);
-        }
-        const chapterNum = parseInt(lastArg);
+        const chapterNum = parseChapterInput(lastArg);
+        if (chapterNum === null) return global.safeSend(api, "❌ يجب أن يكون آخر شيء في الأمر رقم فصل صحيحاً (مثل 1 أو 1.5)\n💡 مثال: .novel martial peak 1", threadID, null, messageID);
         const novelName = args.slice(0, -1).join(" ").trim();
         if (!novelName) {
             return global.safeSend(api, "❌ يجب كتابة اسم الرواية قبل رقم الفصل\n💡 مثال: .novel martial peak 1", threadID, null, messageID);
@@ -512,7 +540,10 @@ export default {
         };
         await updateStatus(`🔍 جلب من ${FALLBACK_SITES.length} مصادر بالتوازي...\n📖 ${novelName}\n📄 الفصل ${chapterNum}`);
         const OVERALL_TIMEOUT = 3e4;
-        const timeoutPromise = new Promise(((_, reject) => setTimeout((() => reject(new Error("انتهى الوقت المسموح (timeout)"))), OVERALL_TIMEOUT)));
+        let timeoutId;
+        const timeoutPromise = new Promise(((_, reject) => {
+            timeoutId = setTimeout(() => reject(new Error("انتهى الوقت المسموح (timeout)")), OVERALL_TIMEOUT);
+        }));
         let result = null;
         let cacheKeyUsed = null;
         const siteErrors = {};
@@ -530,6 +561,8 @@ export default {
             console.log(`[NOVEL] ✅ ${winner.siteName} نجح أولاً`);
         } catch (err) {
             console.warn(`[NOVEL] فشلت كل المصادر الأساسية أو انتهى الوقت: ${err.message?.substring(0, 200)}`);
+        } finally {
+            clearTimeout(timeoutId);
         }
         if (!result) {
             await updateStatus(`🔁 المصادر الأساسية فشلت، تجربة مصدر احتياطي...\n📖 ${novelName}\n📄 الفصل ${chapterNum}`);
@@ -544,23 +577,26 @@ export default {
             }
         }
         if (!result) {
-            await updateStatus(`🔁 تجربة مصدر بديل (مواقع JS)...\n📖 ${novelName}\n📄 الفصل ${chapterNum}`);
-            try {
-                result = await fetchFromJsSitesBridge(novelName, chapterNum);
-                cacheKeyUsed = `${result.siteName}:${novelName}:${chapterNum}`;
-                console.log(`[NOVEL] ✅ ${result.siteName} نجح كمصدر بديل`);
-            } catch (err) {
-                if (err instanceof NeedsSelectionError) {
-                    const list = err.candidates.map(((c, i) => `${i + 1}. ${c.title}`)).join("\n");
-                    const selectMsg = `🔎 وُجدت عدة نتائج متشابهة لـ "${novelName}" على ${err.site}:\n\n${list}\n\n💡 حاول تحديد الاسم بدقة أكبر.`;
-                    try {
-                        if (statusMsgId) await api.editMessage(selectMsg, statusMsgId); else global.safeSend(api, selectMsg, threadID, null, messageID);
-                    } catch (_) {
-                        global.safeSend(api, selectMsg, threadID, null, messageID);
+            await updateStatus(`🔁 تجربة مصدري Go الاحتياطيين...\n📖 ${novelName}\n📄 الفصل ${chapterNum}`);
+            for (const site of JS_SITES) {
+                try {
+                    result = await fetchFromJsSitesBridge(novelName, chapterNum, site);
+                    cacheKeyUsed = `${result.siteName}:${novelName}:${chapterNum}`;
+                    console.log(`[NOVEL] ✅ ${result.siteName} نجح كمصدر Go احتياطي`);
+                    break;
+                } catch (err) {
+                    if (err instanceof NeedsSelectionError) {
+                        const list = err.candidates.map(((c, i) => `${i + 1}. ${c.title}`)).join("\n");
+                        const selectMsg = `🔎 وُجدت عدة نتائج متشابهة لـ "${novelName}" على ${err.site}:\n\n${list}\n\n💡 حاول تحديد الاسم بدقة أكبر.`;
+                        try {
+                            if (statusMsgId) await api.editMessage(selectMsg, statusMsgId); else global.safeSend(api, selectMsg, threadID, null, messageID);
+                        } catch (_) {
+                            global.safeSend(api, selectMsg, threadID, null, messageID);
+                        }
+                        return;
                     }
-                    return;
+                    siteErrors[site] = err.message?.substring(0, 80);
                 }
-                siteErrors[JS_SITES.join("/")] = err.message?.substring(0, 80);
             }
         }
         if (!result) {
@@ -589,6 +625,16 @@ export default {
             console.error("[NOVEL] فشل إرسال الرسائل المقطعة:", err.message);
         }
     }
+};
+
+export const novelScraperTestHelpers = {
+    parseChapterInput,
+    findNovelFullChapterUrl,
+    novelFullIndexPages,
+    buildNovelFullIndexUrl,
+    isChallengeHTML: html => /just a moment|checking your browser|cf-chl-|challenge-platform|attention required\s*\|?\s*cloudflare|verify you are human/i.test(String(html || "").slice(0, 6e3)),
+    supportedFallbackSites: FALLBACK_SITES.map(site => site.name),
+    bridgeSites: [...JS_SITES]
 };
 
 export const $plugin = {

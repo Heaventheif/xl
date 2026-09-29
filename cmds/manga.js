@@ -13,7 +13,11 @@ import { downloadWithLimit } from "../utils/concurrentDownload.js";
 
 const API_BASE = "https://api.mangadex.org";
 
-const MAX_PER_GROUP = 15;
+const MAX_PER_GROUP = 14;
+
+const MAX_CHAPTER_PAGES = 300;
+
+const MAX_IMAGE_BYTES = 16 * 1024 * 1024;
 
 const SEARCH_TTL = 30 * 60 * 1e3;
 
@@ -270,10 +274,26 @@ async function buildPageUrls(chapterId) {
         headers: HEADERS,
         timeout: 15e3
     });
-    const baseUrl = res.data?.baseUrl;
-    const chapter = res.data?.chapter;
-    if (!baseUrl || !chapter?.hash || !Array.isArray(chapter.data)) return [];
-    return chapter.data.map((file => `${baseUrl}/data/${chapter.hash}/${file}`));
+    return buildPageUrlsFromAtHome(res.data);
+}
+
+function buildPageUrlsFromAtHome(data) {
+    const chapter = data?.chapter;
+    if (!data?.baseUrl || !chapter?.hash || !Array.isArray(chapter.data)) return [];
+    let base;
+    try {
+        base = new URL(data.baseUrl);
+    } catch (_) {
+        return [];
+    }
+    if (base.protocol !== "https:" || base.username || base.password) return [];
+    const safeHash = String(chapter.hash);
+    if (!/^[a-z0-9]+$/i.test(safeHash)) return [];
+    const normalizedBase = base.href.replace(/\/+$/, "");
+    return chapter.data
+        .map(file => String(file))
+        .filter(file => file && !/[\\/\u0000]/.test(file) && file !== "." && file !== "..")
+        .map(file => `${normalizedBase}/data/${safeHash}/${encodeURIComponent(file)}`);
 }
 
 async function downloadImage(url, index) {
@@ -284,6 +304,7 @@ async function downloadImage(url, index) {
         timeout: 2e4,
         headers: HEADERS
     });
+    if (!res.data || res.data.byteLength > MAX_IMAGE_BYTES) throw new Error("حجم صورة المانجا يتجاوز الحد المسموح.");
     await fs.writeFile(filePath, res.data);
     return filePath;
 }
@@ -510,6 +531,7 @@ async function tryFallback3asq({api: api, threadID: threadID, messageID: message
         const jobId = await createJob3asq(rawName, chapterNumber);
         const result = await pollJob3asq(jobId);
         if (result.status === "error" || !result.image_count) return false;
+        if (result.image_count > MAX_CHAPTER_PAGES) throw new Error(`عدد الصفحات يتجاوز الحد (${MAX_CHAPTER_PAGES}).`);
         const downloaded = await downloadAllWithLimit3asq(jobId, result.image_count);
         const validFiles = downloaded.filter(Boolean);
         if (!validFiles.length) return false;
@@ -632,6 +654,11 @@ export default {
                     userMsg: "❌ الفصل لا يحتوي على صفحات."
                 };
             }
+            if (pageUrls.length > MAX_CHAPTER_PAGES) {
+                throw {
+                    userMsg: `❌ الفصل يتجاوز الحد الآمن البالغ ${MAX_CHAPTER_PAGES} صفحة.`
+                };
+            }
             const downloaded = await downloadAllWithLimit(pageUrls);
             const validFiles = downloaded.filter(Boolean);
             if (!validFiles.length) {
@@ -678,6 +705,17 @@ export default {
             global.safeSend(api, userMsg, threadID, null, messageID);
         }
     }
+};
+
+export const mangaScraperTestHelpers = {
+    MAX_PER_GROUP,
+    MAX_CHAPTER_PAGES,
+    MAX_IMAGE_BYTES,
+    buildChapterCandidates,
+    isExactChapterMatch,
+    isReadableChapter,
+    pickBestChapterResult,
+    buildPageUrlsFromAtHome
 };
 
 export const $plugin = {

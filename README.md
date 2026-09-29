@@ -558,3 +558,10 @@ For issues and feature requests, use the project's issue tracker or repository d
 Use `mangalik <manga name> <chapter number>` (alias: `mangalek` or `مانجاليك`) to search Mangalik and send the chapter as image attachments. Each message contains at most 14 images. Downloads are limited to 140 images per request; larger chapters are capped with a warning. Fractional chapters such as `139.2` are supported.
 
 Configure Firecrawl credentials in the **Render service Environment** (never commit keys to Git): set `FIRECRAWL_API` to a comma-separated list of keys, for example `key-one,key-two,key-three`. The bot also accepts the legacy spelling `FIRECRUL_API` and rotates keys for each scrape, trying another key after authentication, credit, rate-limit, or server errors. If the key is missing, the bot replies with a configuration notice. Example: `mangalik SPY×FAMILY 138`.
+
+
+## Novel and manga scraping
+
+The `novel` command tries its configured reader sources and then the Go bridge; the bridge supports both `Freewebnovel` and `NovelFull`, including fractional chapter numbers resolved from the chapter’s visible label. NovelFull links can encode fractional chapters ambiguously in their URL, so the parser deliberately matches the displayed chapter label instead of URL prefixes.
+
+The `manga` command uses MangaDex with the 3asq bridge as a fallback. MangaDex chapter matches are exact; page URLs use the server-provided at-home base URL and HTTPS. Chapter image delivery uses groups of at most **14 images**, with a 300-page chapter cap and a 16 MiB per-image cap. The unsupported `cc`/CodeCraft command has been removed.
