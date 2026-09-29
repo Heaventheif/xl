@@ -93,11 +93,15 @@ test("logs the trigger and socket state when MQTT reconnection is requested", as
   let logMessage = "";
   console.warn = (message) => { logMessage = String(message); };
   manager.stopped = false;
+  manager._recordError({ error: "session token=secret-value" }, "TRANSIENT");
 
   try {
     const reconnect = manager.reconnect("ping_failed");
     assert.match(logMessage, /reason=ping_failed/);
     assert.match(logMessage, /socketConnected=false/);
+    assert.match(logMessage, /errorClass=TRANSIENT/);
+    assert.match(logMessage, /lastError=session token=\[redacted\]/);
+    assert.doesNotMatch(logMessage, /secret-value/);
     await manager.stop();
     await reconnect;
   } finally {

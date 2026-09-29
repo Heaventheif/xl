@@ -19,7 +19,13 @@ const DEFAULTS = {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function getErrorText(error) {
-  return String(error?.message || error || "unknown error");
+  const detail = [error?.message, error?.error, error?.type, error?.code]
+    .find(value => typeof value === "string" && value.trim());
+  return String(detail || error || "unknown error")
+    .replace(/([?&](?:access_token|fb_dtsg|token|sid|cid)=)[^&\s]*/gi, "$1[redacted]")
+    .replace(/\b(password|cookie|appstate|token|authorization)(\s*[:=]\s*)\S+/gi, "$1$2[redacted]")
+    .replace(/[\r\n]+/g, " ")
+    .slice(0, 300);
 }
 
 export function classifyMqttError(error) {
@@ -129,7 +135,8 @@ export class MqttConnectionManager extends EventEmitter {
     console.warn(
       `[MQTT:${this.label}] reconnect requested reason=${reason} state=${this.state} ` +
       `socketConnected=${socketConnected} activityAgeMs=${activityAgeMs} ` +
-      `consecutiveErrors=${this.consecutiveErrors}`
+      `consecutiveErrors=${this.consecutiveErrors} errorClass=${this.lastErrorClass || "none"} ` +
+      `lastError=${this.lastError || "none"}`
     );
     this.reconnectPromise = this._reconnect(reason).finally(() => {
       this.reconnectPromise = null;
