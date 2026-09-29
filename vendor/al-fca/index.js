@@ -349,9 +349,8 @@ function buildAPI(globalOptions, html, jar) {
         }
     };
     //if (noMqttData) api.htmlData = noMqttData;
-    // Invariant: every src/**/*.js file must export a factory
-    // function (defaults, api, ctx); the loader calls it to build api[name].
-    // Non-factory helpers (logger.js, login.js) are excluded.
+    // API modules export factories (defaults, api, ctx); shared helpers may
+    // export ordinary objects and are skipped by the callable check below.
     function loadApiModules(dir) {
         require('fs').readdirSync(dir).forEach(v => {
             const fullPath = require('path').join(dir, v);
@@ -361,7 +360,11 @@ function buildAPI(globalOptions, html, jar) {
             } else if (v.endsWith('.js') && v !== 'logger.js' && v !== 'login.js') {
                 const relPath = require('path').relative(__dirname, fullPath).replace(/\\/g, '/');
                 const name = v.replace('.js', '');
-                api[name] = require('./' + relPath)(utils.makeDefaults(html, userID, ctx), api, ctx);
+                const factory = require('./' + relPath);
+                // Some source files are shared helpers (for example core/defaults
+                // and core/humanize), not API factories. Do not invoke them here.
+                if (typeof factory !== 'function') return;
+                api[name] = factory(utils.makeDefaults(html, userID, ctx), api, ctx);
             }
         });
     }
