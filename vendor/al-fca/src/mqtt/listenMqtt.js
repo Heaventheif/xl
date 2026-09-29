@@ -455,7 +455,7 @@ function listenMqtt(defaultFuncs, api, ctx, globalCallback) {
         ctx.tmsWait = function () {
             clearTimeout(rTimeout); rTimeout = null;
             ctx._reconnectAttempts = 0;
-            if (ctx.globalOptions.emitReady) globalCallback({ type: "ready", error: null });
+            if (ctx.globalOptions.emitReady) globalCallback(null, { type: "ready", error: null });
             delete ctx.tmsWait;
 
             // ── E2EE bridge init ──────────────────────────────────────────────────

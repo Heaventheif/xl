@@ -216,6 +216,15 @@ export class MqttConnectionManager extends EventEmitter {
 
     try {
       this.listener = this.api.listenMqtt((error, event) => {
+        const readyEvent = event?.type === "ready"
+          ? event
+          : error?.type === "ready" && error.error == null
+            ? error
+            : null;
+        if (readyEvent) {
+          this._recordEvent(readyEvent, { dispatch: false });
+          return;
+        }
         if (error) {
           this._recordError(error);
           void this.reconnect("listener_error");
@@ -370,7 +379,7 @@ export class MqttConnectionManager extends EventEmitter {
     }
   }
 
-  _recordEvent(event) {
+  _recordEvent(event, { dispatch = true } = {}) {
     this.lastEventAt = Date.now();
     this.eventsReceived++;
     this.lastEventType = event?.type || "unknown";
@@ -384,6 +393,7 @@ export class MqttConnectionManager extends EventEmitter {
     }
     this.state = "CONNECTED";
     this._emitState();
+    if (!dispatch) return;
     // FIX-BUFFER: إذا كنا نعالج حدثاً آخر، خزِّن هذا الحدث مؤقتاً
     if (this._processingEvent) {
       const EVENT_BUFFER_MAX = 50;

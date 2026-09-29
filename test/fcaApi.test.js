@@ -70,6 +70,31 @@ test("leaves MQTT reconnection to the bot's single watchdog", () => {
   assert.equal(getFcaOptions().autoReconnect, false);
 });
 
+test("treats al-fca ready callback envelopes as healthy activity, not listener errors", async () => {
+  let callback;
+  let dispatchedEvents = 0;
+  const manager = new MqttConnectionManager({
+    _mqttClient: { connected: true },
+    listenMqtt(listenerCallback) {
+      callback = listenerCallback;
+      return { stopListeningAsync: async () => {} };
+    },
+  });
+  manager.stopped = false;
+  manager.on("event", () => { dispatchedEvents++; });
+
+  await manager._connectOnce("startup");
+  callback(null, { type: "ready", error: null });
+  callback({ type: "ready", error: null });
+
+  const health = manager.health();
+  assert.equal(health.state, "CONNECTED");
+  assert.equal(health.lastEventType, "ready");
+  assert.equal(health.eventsReceived, 2);
+  assert.equal(manager.errors, 0);
+  assert.equal(dispatchedEvents, 0);
+});
+
 test("does not report a known-disconnected MQTT socket as healthy from stale activity", () => {
   const previous = global.mqttClient;
   try {
