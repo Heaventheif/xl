@@ -11,7 +11,8 @@ import { getHfBase, getInternalToken } from "../utils/hfClient.js";
 import { loadCtx as _loadCtx, saveCtx as _saveCtx, clearCtx } from "../utils/sharedSession.js";
 
 const COLLECTION = "groq_sessions";
-
+// Groq's current official multimodal model (see console.groq.com/docs/vision).
+const GROQ_VISION_MODEL = "qwen/qwen3.8-27b";
 const loadCtx = id => _loadCtx(COLLECTION, id);
 
 const saveCtx = (id, msgs) => _saveCtx(COLLECTION, id, msgs);
@@ -172,7 +173,8 @@ async function handle(api, event, prompt, registerReply) {
             rootAttachment = {
                 kind: "image",
                 base64: imgData.base64,
-                contentType: imgData.contentType
+                contentType: imgData.contentType,
+                model: GROQ_VISION_MODEL
             };
         } else {
             userMsg = {
