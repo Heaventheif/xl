@@ -1,3 +1,4 @@
+import { downloadMedia } from "../utils/mediaApi.js";
 
 
 import axios from "axios";
@@ -14,7 +15,7 @@ import { streamAndSend } from "../utils/mediaStream.js";
 
 import { directSend, directSendParts } from "../utils/directSend.js";
 
-import { downloadWithFallback, cleanTemp } from "../utils/ytProviders.js";
+import { cleanTemp } from "../utils/ytProviders.js";
 
 import { normalizeMediaUrl } from "../utils/urlNormalizer.js";
 import { getYozoraInfo, getYozoraTitle, buildYozoraDownloadUrl } from "../utils/yozora.js";
@@ -173,17 +174,17 @@ async function resolveInstagram(url) {
 }
 
 async function resolveYouTube(url) {
-    try {
-        const result = await downloadWithFallback(url, true);
-        return {
-            title: result.title || "YouTube Video",
-            filePath: result.filePath,
-            platform: "youtube",
-            isFile: true
-        };
-    } catch (e) {
-        throw new Error(`فشل تحميل يوتيوب: ${e.message}`);
-    }
+  try {
+    const result = await downloadMedia(url, { type: "video", q: 720 });
+    return {
+      title: result.title || "YouTube Video",
+      filePath: result.filePath,
+      platform: "youtube",
+      isFile: true,
+    };
+  } catch (e) {
+    throw new Error(`فشل تحميل يوتيوب عبر YTDLP API: ${e.message}`);
+  }
 }
 
 async function resolveMetaMedia(url) {
@@ -319,43 +320,17 @@ async function getSoundCloudClientId() {
 }
 
 async function resolveSoundCloud(url) {
-    let clientId = await getSoundCloudClientId();
-    const resolveTrack = async cid => {
-        const {data: track} = await http.get("https://api-v2.soundcloud.com/resolve", {
-            params: {
-                url: url,
-                client_id: cid
-            },
-            timeout: 2e4
-        });
-        return track;
-    };
-    let track;
-    try {
-        track = await resolveTrack(clientId);
-    } catch (e) {
-        if (e?.response?.status === 401) {
-            _scClientIdCache = null;
-            clientId = await getSoundCloudClientId();
-            track = await resolveTrack(clientId);
-        } else {
-            throw e;
-        }
-    }
-    const transcodings = track?.media?.transcodings || [];
-    const best = transcodings.find((t => t.format?.protocol === "progressive")) || transcodings[0];
-    if (!best?.url) throw new Error("لم يُعثر على رابط تدفّق للمقطع");
-    const {data: streamInfo} = await http.get(best.url, {
-        params: {
-            client_id: clientId
-        },
-        timeout: 2e4
-    });
+  try {
+    const result = await downloadMedia(url, { type: "audio" });
     return {
-        title: track?.title || "SoundCloud Audio",
-        audioUrl: streamInfo?.url,
-        platform: "soundcloud"
+      title: result.title || "SoundCloud Audio",
+      filePath: result.filePath,
+      platform: "soundcloud",
+      isFile: true,
     };
+  } catch (e) {
+    throw new Error(`فشل تحميل SoundCloud عبر YTDLP API: ${e.message}`);
+  }
 }
 
 async function resolveSpotify(url) {

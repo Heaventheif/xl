@@ -3,6 +3,7 @@ import os from "os";
 import path from "path";
 import { randomUUID } from "node:crypto";
 import { pipeline } from "node:stream/promises";
+import { downloadMedia } from "./mediaApi.js";
 import http from "./fetchHttp.js";
 import vreden from "@vreden/youtube_scraper";
 import { searchVideos, downloadAudio, downloadVideo, normalizeYoutubeUrl } from "./ytEngine.js";
@@ -156,8 +157,16 @@ const ccProjectProvider = {
   },
 };
 
+const ytdlpApiProvider = {
+  name: "ytdlp-api",
+  async download(url, wantMp4) {
+    const result = await downloadMedia(url, { type: wantMp4 ? "video" : "audio", q: 360 });
+    return { filePath: result.filePath, title: result.title || "YouTube media", duration: 0, uploader: "" };
+  },
+};
+
 // Vreden is primary, followed by the previous XL provider and the same stream fallback as F.
-export const providers = [vredenProvider, engineProvider, ytDlpStreamProvider, ccProjectProvider];
+export const providers = [ytdlpApiProvider, vredenProvider, engineProvider, ytDlpStreamProvider, ccProjectProvider];
 
 const SEARCH_CACHE_TTL_MS = 3 * 60 * 1000;
 const MAX_SEARCH_CACHE_ENTRIES = 100;
