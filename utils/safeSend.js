@@ -5,6 +5,18 @@ const PRIORITY_SEND_GAP_MS = 800;
 
 const JITTER_RANGE_MS = 400;
 
+const configuredSendTimeout = Number.parseInt(process.env.FB_SEND_TIMEOUT_MS || "", 10);
+const SEND_TIMEOUT_MS = Number.isSafeInteger(configuredSendTimeout) && configuredSendTimeout > 0
+    ? Math.min(configuredSendTimeout, 300_000) : 60_000;
+function sendWithTimeout(startSend) {
+    let timer;
+    const sendPromise = Promise.resolve().then(startSend);
+    const timeoutPromise = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Facebook sendMessage timed out after ${SEND_TIMEOUT_MS}ms`)), SEND_TIMEOUT_MS);
+    });
+    return Promise.race([sendPromise, timeoutPromise]).finally(() => clearTimeout(timer));
+}
+
 const _threadGates = new Map;
 
 function _gate(key, gapMs) {
@@ -59,7 +71,9 @@ async function _send(api, body, threadID, callback, messageID, gapMs, label) {
         if (rawApi.__stealth) try { await Promise.race([rawApi.__stealth.waitIfNeeded(), new Promise(r => setTimeout(r, 25e3))]); } catch {}
         gate.lastSendAt = Date.now();
         try {
-            const result = messageID !== undefined ? await rawApi.sendMessage(body, threadID, callback, messageID) : await rawApi.sendMessage(body, threadID, callback);
+            const result = await sendWithTimeout(() => messageID !== undefined
+                ? rawApi.sendMessage(body, threadID, callback, messageID)
+                : rawApi.sendMessage(body, threadID, callback));
             rawApi.__stealth?.recordRequest?.();
             return result;
         } catch (error) {

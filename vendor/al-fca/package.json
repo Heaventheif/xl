@@ -12,7 +12,7 @@
     "docs/E2EE_GUIDE.md",
     "!e2ee/**/*.map",
     "!e2ee/**/*.ts",
-    "!config.json",
+    "!config.json"
   ],
   "scripts": {
     "test": "node --test \"test/*.test.js\"",
@@ -28,7 +28,7 @@
     "gradient-string": "^2.0.2",
     "https-proxy-agent": "^7.0.6",
     "mime": "^3.0.0",
-    "mqtt": "^5.10.1",
+    "mqtt": "^5.16.0",
     "protobufjs": "^8.0.1",
     "request": "^2.88.2",
     "ws": "^8.18.1"
